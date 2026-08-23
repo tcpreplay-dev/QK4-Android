@@ -2,8 +2,6 @@
 #include "dualcontrolbutton.h"
 #include "duallinepanelbutton.h"
 #include "k4styles.h"
-#include "monoverlay.h"
-#include "baloverlay.h"
 #include "../settings/radiosettings.h"
 #include <QVBoxLayout>
 #include <QSizePolicy>
@@ -191,6 +189,16 @@ void SideControlPanel::setupUi() {
     m_shiftBtn->setShowIndicator(false); // Second button starts inactive
     addAdjustmentRow(m_shiftBtn, m_shiftSlider, K4Styles::Colors::VfoACyan);
 
+    // NORM affects only the filter passband, so keep it in the filter group.
+    m_normBtn = new QPushButton(QStringLiteral("NORM"), this);
+    m_normBtn->setFixedHeight(32);
+    m_normBtn->setStyleSheet(K4Styles::compactButton());
+    m_normBtn->setAccessibleName(QStringLiteral("Normalize receive filter passband"));
+    m_normBtn->setToolTip(QStringLiteral("Restore the current mode's nominal filter passband"));
+    m_normBtn->installEventFilter(this);
+    layout->addWidget(m_normBtn);
+    connect(m_normBtn, &QPushButton::clicked, this, &SideControlPanel::normalizeFilterRequested);
+
     // ===== Spacing between groups =====
     layout->addSpacing(K4Styles::Dimensions::PaddingLarge);
 
@@ -212,66 +220,6 @@ void SideControlPanel::setupUi() {
     m_subSqlBtn->setContext(DualControlButton::SubRx);
     m_subSqlBtn->setShowIndicator(false); // Second button starts inactive
     addAdjustmentRow(m_subSqlBtn, m_subSqlSlider, K4Styles::Colors::VfoBGreen);
-
-    // ===== MON/NORM/BAL Buttons =====
-    layout->addSpacing(K4Styles::Dimensions::PaddingMedium);
-
-    // Wrap in container widget for proper layout sizing
-    auto *swBtnContainer = new QWidget(this);
-    swBtnContainer->setFixedHeight(K4Styles::Dimensions::ButtonHeightMini);
-    auto *swBtnRow = new QHBoxLayout(swBtnContainer);
-    swBtnRow->setContentsMargins(0, 0, 0, 0);
-    swBtnRow->setSpacing(K4Styles::Dimensions::SeparatorHeight + 1);
-
-    m_monBtn = new QPushButton("MON", swBtnContainer);
-    m_monBtn->setStyleSheet(K4Styles::compactButton());
-    m_monBtn->setFixedHeight(K4Styles::Dimensions::ButtonHeightMini);
-    swBtnRow->addWidget(m_monBtn);
-
-    m_normBtn = new QPushButton("NORM", swBtnContainer);
-    m_normBtn->setStyleSheet(K4Styles::compactButton());
-    m_normBtn->setFixedHeight(K4Styles::Dimensions::ButtonHeightMini);
-    swBtnRow->addWidget(m_normBtn);
-
-    m_balBtn = new QPushButton("BAL", swBtnContainer);
-    m_balBtn->setStyleSheet(K4Styles::compactButton());
-    m_balBtn->setFixedHeight(K4Styles::Dimensions::ButtonHeightMini);
-    swBtnRow->addWidget(m_balBtn);
-
-    layout->addWidget(swBtnContainer);
-
-    // Create overlay widgets (initially hidden)
-    m_monOverlay = new MonOverlay(this);
-    m_balOverlay = new BalOverlay(this);
-
-    // Connect MON button - toggles MON overlay
-    connect(m_monBtn, &QPushButton::clicked, this, [this]() {
-        emit swCommandRequested("SW128;");
-        if (m_monOverlay->isVisible()) {
-            m_monOverlay->hide();
-        } else {
-            m_balOverlay->hide(); // Close other overlay
-            m_monOverlay->showOverGroup(m_wpmBtn, m_pwrBtn);
-        }
-    });
-
-    // Connect NORM button - just sends command, no overlay
-    connect(m_normBtn, &QPushButton::clicked, this, [this]() { emit swCommandRequested("SW129;"); });
-
-    // Connect BAL button - sends SW130 and toggles BAL overlay
-    connect(m_balBtn, &QPushButton::clicked, this, [this]() {
-        emit swCommandRequested("SW130;");
-        if (m_balOverlay->isVisible()) {
-            m_balOverlay->hide();
-        } else {
-            m_monOverlay->hide(); // Close other overlay
-            m_balOverlay->showOverGroup(m_mainRfBtn, m_subSqlBtn);
-        }
-    });
-
-    // Connect overlay signals
-    connect(m_monOverlay, &MonOverlay::levelChangeRequested, this, &SideControlPanel::monLevelChangeRequested);
-    connect(m_balOverlay, &BalOverlay::balanceChangeRequested, this, &SideControlPanel::balChangeRequested);
 
     // ===== Stretch to push status/icons to bottom =====
     layout->addStretch();
@@ -892,25 +840,6 @@ void SideControlPanel::setPhoneMicGain(int value) {
     m_phoneMicGainSlider->blockSignals(true);
     m_phoneMicGainSlider->setValue(qBound(0, value, 100));
     m_phoneMicGainSlider->blockSignals(false);
-}
-
-void SideControlPanel::updateMonitorLevel(int mode, int level) {
-    // Only update if this is the current mode
-    if (m_monOverlay && m_monOverlay->mode() == mode) {
-        m_monOverlay->setValue(level);
-    }
-}
-
-void SideControlPanel::updateMonitorMode(int mode) {
-    if (m_monOverlay) {
-        m_monOverlay->setMode(mode);
-    }
-}
-
-void SideControlPanel::updateBalance(int mode, int offset) {
-    if (m_balOverlay) {
-        m_balOverlay->setBalance(mode, offset);
-    }
 }
 
 void SideControlPanel::cancelPendingLongPress() {

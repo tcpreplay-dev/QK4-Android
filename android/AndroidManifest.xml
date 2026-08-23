@@ -1,9 +1,9 @@
 <?xml version="1.0"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.ai5qk.qk4phone"
+    package="com.w9wdx.qk4phone"
     android:installLocation="auto"
-    android:versionCode="25"
-    android:versionName="0.8.3">
+    android:versionCode="26"
+    android:versionName="1.0">
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
     <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
@@ -24,7 +24,7 @@
         android:theme="@style/K4PhoneTheme"
         android:enableOnBackInvokedCallback="false" android:allowBackup="true"
         android:fullBackupOnly="false">
-        <activity android:name="org.qtproject.qt.android.bindings.QtActivity"
+        <activity android:name="com.w9wdx.qk4phone.Qk4Activity"
             android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density"
             android:label="QK4 Mobile" android:launchMode="singleTop"
             android:theme="@style/K4PhoneTheme"

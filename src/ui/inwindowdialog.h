@@ -5,6 +5,7 @@
 #include <QWidget>
 
 class QEventLoop;
+class QEvent;
 class QFrame;
 class QKeyEvent;
 
@@ -32,13 +33,17 @@ signals:
     void accepted();
     void rejected();
     void finished(int result);
+    void panelResized(const QSize &size);
 
 protected:
     void keyPressEvent(QKeyEvent *event) override;
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
+    void fitToParent();
     QFrame *m_panel = nullptr;
     QEventLoop *m_eventLoop = nullptr;
+    QSize m_preferredPanelSize;
     int m_result = Rejected;
 };
 

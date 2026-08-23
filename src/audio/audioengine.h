@@ -11,6 +11,7 @@
 #include <QQueue>
 #include <QMutex>
 #include <atomic>
+#include "sstv/sstvencoder.h"
 
 class OpusEncoder;
 
@@ -40,6 +41,21 @@ public:
     bool isPttActive() const { return m_pttActive.load(std::memory_order_relaxed); }
     void setEncodeMode(int mode);
     void setFrameSamples(int samples);
+
+    // SSTV owns the same Opus encoder and frame clock as microphone TX, but
+    // has an exclusive program-audio source.  The caller must obtain the K4
+    // TX lease before beginSstvTransmit(); these methods never send CAT.
+    Q_INVOKABLE void prepareSstvTransmit(const QImage &frame, int modeId,
+                                         const QString &morseId, int morseWpm,
+                                         const QString &fskId,
+                                         quint64 generation);
+    Q_INVOKABLE void beginSstvTransmit();
+    Q_INVOKABLE void stopSstvTransmit();
+    // Safe to call directly from the UI thread. It immediately prevents the
+    // audio timer from producing any further program packet; the queued stop
+    // then disposes the encoder on its owning thread.
+    void requestSstvStop();
+    bool isSstvTransmitActive() const { return m_sstvActive.load(std::memory_order_acquire); }
 
     // Channel volume controls (applied at playback time for instant response)
     void setMainVolume(float volume);
@@ -77,10 +93,19 @@ public:
 signals:
     void micLevelChanged(float level);                 // RMS level 0.0-1.0 for meter display
     void txPacketReady(const QByteArray &packet);       // Encoded K4 TX packet from audio thread
+    // The sample counters travel with the packet. TcpClient reports progress
+    // only after it accepts this packet through the still-open SSTV gate.
+    void sstvPacketReady(const QByteArray &packet, int emittedSamples, int totalSamples,
+                         int imageSamples, quint64 generation);
+    void sstvPrepared(bool ready, const QString &error, int totalSamples, quint64 generation);
+    void sstvFailed(const QString &reason, quint64 generation);
+    void sstvProgress(int emittedSamples, int totalSamples);
+    void sstvFinished(quint64 generation);
     void bufferStatus(int queueBytes, int maxBytes, bool prebuffering);
 
 private slots:
     void onMicDataReady();
+    void onSstvPacer();
     void feedAudioDevice();
     void onSystemDefaultInputChanged();
     void onSystemDefaultOutputChanged();
@@ -94,7 +119,8 @@ private:
 
     // Resample into a reusable buffer, avoiding allocations in the microphone hot path.
     const QByteArray &resample48kTo12k(const QByteArray &input48k);
-    void encodeAndSendFrame(const QByteArray &s16leData, int frameSamples, int encodeMode);
+    void encodeAndSendFrame(const QByteArray &s16leData, int frameSamples, int encodeMode,
+                            bool sstvProgram = false);
 
     // Apply MX routing + volume + balance to a raw [main, sub] interleaved packet
     void applyMixAndVolume(QByteArray &packet);
@@ -167,6 +193,11 @@ private:
     std::atomic<int> m_encodeMode{3};
     // Frame size follows the connected radio's SL tier, exactly as in QK4 main.
     std::atomic<int> m_frameSamples{240};
+    std::atomic<bool> m_sstvActive{false};
+    bool m_sstvPrepared = false;
+    SstvEncoder m_sstvEncoder;
+    quint64 m_sstvGeneration = 0;
+    QTimer *m_sstvPacerTimer = nullptr;
 
     // Audio throughput: 12kHz × 2ch × sizeof(float) = 96,000 bytes/sec = 96 bytes/ms
     static constexpr int BYTES_PER_MS = 96;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(QK4 VERSION 0.8.3 LANGUAGES CXX)
+project(QK4 VERSION 1.0 LANGUAGES CXX)
 include(CTest)
 
 # Optional override paths for Opus when cross-compiling (primarily Android)
@@ -162,6 +162,12 @@ set(SOURCES
     src/audio/opusdecoder.cpp
     src/audio/opusencoder.cpp
     src/audio/sidetonegenerator.cpp
+    src/sstv/sstvmoderegistry.cpp
+    src/sstv/sstvencoder.cpp
+    src/sstv/sstvdecoder.cpp
+    src/sstv/sstvstorage.cpp
+    src/android/sstvorientation.cpp
+    src/android/sstvmedia.cpp
     src/hardware/iambickeyer.cpp
     src/dsp/panadapter_rhi.cpp
     src/dsp/minipan_rhi.cpp
@@ -202,6 +208,9 @@ set(SOURCES
     src/ui/dtmfpopup.cpp
     src/ui/txmodepopup.cpp
     src/ui/softwarelistpopup.cpp
+    src/ui/dxprefixlistdialog.cpp
+    src/ui/sstvscreen.cpp
+    src/ui/sstvcomposercanvas.cpp
     src/ui/textdecodewindow.cpp
     src/ui/macrodialog.cpp
     src/ui/notificationwidget.cpp
@@ -242,6 +251,12 @@ set(HEADERS
     src/audio/opusdecoder.h
     src/audio/opusencoder.h
     src/audio/sidetonegenerator.h
+    src/sstv/sstvmoderegistry.h
+    src/sstv/sstvencoder.h
+    src/sstv/sstvdecoder.h
+    src/sstv/sstvstorage.h
+    src/android/sstvorientation.h
+    src/android/sstvmedia.h
     src/hardware/iambickeyer.h
     src/dsp/panadapter_rhi.h
     src/dsp/minipan_rhi.h
@@ -281,6 +296,9 @@ set(HEADERS
     src/ui/dtmfpopup.h
     src/ui/txmodepopup.h
     src/ui/softwarelistpopup.h
+    src/ui/dxprefixlistdialog.h
+    src/ui/sstvscreen.h
+    src/ui/sstvcomposercanvas.h
     src/ui/textdecodewindow.h
     src/ui/macrodialog.h
     src/ui/notificationwidget.h
@@ -458,7 +476,7 @@ if(ANDROID)
     set_target_properties(${PROJECT_NAME} PROPERTIES
         # Keep the phone build installable alongside an existing QK4 APK that
         # may be signed with a different developer certificate.
-        QT_ANDROID_PACKAGE_NAME "com.ai5qk.qk4phone"
+        QT_ANDROID_PACKAGE_NAME "com.w9wdx.qk4phone"
         QT_ANDROID_MIN_SDK_VERSION 26
         QT_ANDROID_TARGET_SDK_VERSION 34
         QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android"
@@ -598,4 +616,44 @@ if(BUILD_TESTING AND NOT ANDROID)
     target_include_directories(test_frequencyentryparser PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_frequencyentryparser PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME frequencyentryparser COMMAND test_frequencyentryparser)
+
+    qt_add_executable(test_radiostate
+        tests/test_radiostate.cpp
+        src/models/radiostate.cpp
+        src/models/radiostate.h
+    )
+    target_include_directories(test_radiostate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_radiostate PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME radiostate COMMAND test_radiostate)
+
+    qt_add_executable(test_sstvencoder
+        tests/test_sstvencoder.cpp
+        src/sstv/sstvmoderegistry.cpp
+        src/sstv/sstvmoderegistry.h
+        src/sstv/sstvencoder.cpp
+        src/sstv/sstvencoder.h
+        src/sstv/sstvdecoder.cpp
+        src/sstv/sstvdecoder.h
+    )
+    target_include_directories(test_sstvencoder PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_sstvencoder PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+    add_test(NAME sstvencoder COMMAND test_sstvencoder)
+
+    qt_add_executable(test_sstvcomposer
+        tests/test_sstvcomposer.cpp
+        src/ui/sstvcomposercanvas.cpp
+        src/ui/sstvcomposercanvas.h
+    )
+    target_include_directories(test_sstvcomposer PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_sstvcomposer PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Test)
+    add_test(NAME sstvcomposer COMMAND test_sstvcomposer)
+
+    qt_add_executable(test_sstvstorage
+        tests/test_sstvstorage.cpp
+        src/sstv/sstvstorage.cpp
+        src/sstv/sstvstorage.h
+    )
+    target_include_directories(test_sstvstorage PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_sstvstorage PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
+    add_test(NAME sstvstorage COMMAND test_sstvstorage)
 endif()

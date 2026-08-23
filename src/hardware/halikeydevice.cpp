@@ -50,7 +50,7 @@ HalikeyDevice::HalikeyDevice(QObject *parent) : QObject(parent) {
     m_androidConnectionPollTimer->setInterval(250);
     connect(m_androidConnectionPollTimer, &QTimer::timeout, this, [this]() {
         const int state = QJniObject::callStaticMethod<jint>(
-                "com/ai5qk/qk4phone/AndroidBleMidi", "getConnectionState", "()I");
+                "com/w9wdx/qk4phone/AndroidBleMidi", "getConnectionState", "()I");
         if (state != m_androidConnectionState) {
             const int previous = m_androidConnectionState;
             m_androidConnectionState = state;
@@ -78,7 +78,7 @@ HalikeyDevice::HalikeyDevice(QObject *parent) : QObject(parent) {
     connect(m_androidMidiPollTimer, &QTimer::timeout, this, [this]() {
         for (int count = 0; count < 64; ++count) {
             const int event = QJniObject::callStaticMethod<jint>(
-                    "com/ai5qk/qk4phone/AndroidBleMidi", "pollEvent", "()I");
+                    "com/w9wdx/qk4phone/AndroidBleMidi", "pollEvent", "()I");
             if (event < 0)
                 break;
             const int status = (event >> 16) & 0xff;
@@ -151,7 +151,7 @@ bool HalikeyDevice::openPort(const QString &portName) {
     const QJniObject context = androidContext();
     const QJniObject address = QJniObject::fromString(portName);
     if (!context.isValid() || !QJniObject::callStaticMethod<jboolean>(
-            "com/ai5qk/qk4phone/AndroidBleMidi", "connect",
+            "com/w9wdx/qk4phone/AndroidBleMidi", "connect",
             "(Landroid/content/Context;Ljava/lang/String;)Z", context.object(), address.object<jstring>())) {
         emit connectionError(statusMessage());
         return false;
@@ -161,7 +161,7 @@ bool HalikeyDevice::openPort(const QString &portName) {
 }
 
 void HalikeyDevice::closePort() {
-    QJniObject::callStaticMethod<void>("com/ai5qk/qk4phone/AndroidBleMidi", "disconnect", "()V");
+    QJniObject::callStaticMethod<void>("com/w9wdx/qk4phone/AndroidBleMidi", "disconnect", "()V");
     m_androidMidiPollTimer->stop();
     bool wasConnected = m_connected;
     m_androidConnectionState = 0;
@@ -196,20 +196,20 @@ QList<HaliKeyPortInfo> HalikeyDevice::availablePortsDetailed() {
 
 QStringList HalikeyDevice::availableMidiDevices() {
     const QJniObject devices = QJniObject::callStaticObjectMethod(
-            "com/ai5qk/qk4phone/AndroidBleMidi", "getDevices", "()Ljava/lang/String;");
+            "com/w9wdx/qk4phone/AndroidBleMidi", "getDevices", "()Ljava/lang/String;");
     return devices.isValid() ? devices.toString().split('\n', Qt::SkipEmptyParts) : QStringList{};
 }
 
 void HalikeyDevice::startMidiScan() {
     const QJniObject context = androidContext();
     if (context.isValid())
-        QJniObject::callStaticMethod<void>("com/ai5qk/qk4phone/AndroidBleMidi", "startScan",
+        QJniObject::callStaticMethod<void>("com/w9wdx/qk4phone/AndroidBleMidi", "startScan",
                                            "(Landroid/content/Context;)V", context.object());
 }
 
 QString HalikeyDevice::statusMessage() const {
     const QJniObject message = QJniObject::callStaticObjectMethod(
-            "com/ai5qk/qk4phone/AndroidBleMidi", "getStatusMessage", "()Ljava/lang/String;");
+            "com/w9wdx/qk4phone/AndroidBleMidi", "getStatusMessage", "()Ljava/lang/String;");
     return message.isValid() ? message.toString() : QStringLiteral("Android MIDI unavailable");
 }
 

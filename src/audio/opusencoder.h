@@ -14,6 +14,7 @@ public:
     ~OpusEncoder();
 
     bool initialize(int sampleRate = 12000, int channels = 1, int bitrate = 24000);
+    bool reset();
     // K4 streaming latency tiers use 240/480/720/1440 samples at 12 kHz.
     QByteArray encode(const QByteArray &pcmData, int frameSamples);
 

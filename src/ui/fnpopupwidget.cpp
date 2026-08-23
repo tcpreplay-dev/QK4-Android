@@ -141,7 +141,8 @@ FnPopupWidget::FnPopupWidget(QWidget *parent) : K4PopupBase(parent) {
 QSize FnPopupWidget::contentSize() const {
     int cm = K4Styles::Dimensions::PopupContentMargin;
 
-    int width = 7 * ButtonWidth + 6 * ButtonSpacing + 2 * cm;
+    const int buttonCount = m_buttons.isEmpty() ? 8 : m_buttons.size();
+    int width = buttonCount * ButtonWidth + (buttonCount - 1) * ButtonSpacing + 2 * cm;
     int height = ButtonHeight + 2 * cm;
     return QSize(width, height);
 }
@@ -168,7 +169,8 @@ void FnPopupWidget::setupButtons() {
                                      {"F7", "F8", MacroIds::FnF7, MacroIds::FnF8},
                                      {"SCRN CAP", "", MacroIds::ScrnCap, ""},
                                      {"SW LIST", "UPDATE", MacroIds::SwList, MacroIds::Update},
-                                     {"DXLIST", "", MacroIds::DxList, ""}};
+                                     {"DXLIST", "", MacroIds::DxList, ""},
+                                     {"SSTV", "", MacroIds::Sstv, ""}};
 
     for (int i = 0; i < buttonDefs.size(); ++i) {
         auto btn = new FnMenuButton(buttonDefs[i].primary, buttonDefs[i].alternate, this);

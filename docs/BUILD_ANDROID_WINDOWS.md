@@ -86,6 +86,32 @@ For multiple connected devices:
 .\build-android.cmd -Action Install -DeviceSerial <adb-serial>
 ```
 
+## One-time migration from the former Android package
+
+The development package changed from `com.ai5qk.qk4phone` to
+`com.w9wdx.qk4phone`. Android treats these as separate applications, so a
+normal APK install cannot inherit the old package's private data.
+
+For a development phone containing the debuggable old package, leave it
+installed, install the new APK, and then run:
+
+```powershell
+.\build-android.cmd -Action Install -DeviceSerial <adb-serial>
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\migrate-android-package.ps1 `
+    -DeviceSerial <adb-serial> -RemoveOldPackage
+```
+
+The migration utility force-stops both applications, copies only
+`files/settings` and `files/sstv` through Android's private `run-as` boundary,
+compares every old/new file by SHA-256, writes a one-time completion marker,
+and removes the old package only after verification succeeds. Data moves in
+bounded private ADB blocks without being written to shared storage or printed.
+If validation fails, the old package remains installed.
+
+`run-as` is available only for debuggable APKs. A public release-package
+migration would require a separately shipped, same-signature export bridge in
+the old application; do not place profile data or passwords in shared storage.
+
 The generated build tree is `build-android-arm64` and is intentionally excluded from Git.
 
 ## Moving to another PC

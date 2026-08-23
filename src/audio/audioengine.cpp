@@ -7,6 +7,7 @@
 #include <QtMultimedia/private/qaudiodevice_p.h>
 #endif
 #include <QDebug>
+#include <algorithm>
 #include <cmath>
 #ifdef Q_OS_ANDROID
 #include <QJniObject>
@@ -22,7 +23,7 @@ void setAndroidTransmitRoute(bool active) {
         return;
 
     QJniObject::callStaticMethod<void>(
-            "com/ai5qk/qk4phone/AndroidAudioRouter", "setTransmitActive",
+            "com/w9wdx/qk4phone/AndroidAudioRouter", "setTransmitActive",
             "(Landroid/content/Context;Z)V", context.object(), active);
 }
 
@@ -32,7 +33,7 @@ int androidWiredOutputDeviceId() {
         return -1;
 
     return QJniObject::callStaticMethod<jint>(
-            "com/ai5qk/qk4phone/AndroidAudioRouter", "getPreferredWiredOutputDeviceId",
+            "com/w9wdx/qk4phone/AndroidAudioRouter", "getPreferredWiredOutputDeviceId",
             "(Landroid/content/Context;)I", context.object());
 }
 
@@ -42,7 +43,7 @@ int androidOutputSampleRate(int deviceId) {
         return 0;
 
     return QJniObject::callStaticMethod<jint>(
-            "com/ai5qk/qk4phone/AndroidAudioRouter", "getOutputSampleRate",
+            "com/w9wdx/qk4phone/AndroidAudioRouter", "getOutputSampleRate",
             "(Landroid/content/Context;I)I", context.object(), deviceId);
 }
 
@@ -50,7 +51,7 @@ bool startAndroidPlayback()
 {
     const QJniObject context = QNativeInterface::QAndroidApplication::context();
     return context.isValid() && QJniObject::callStaticMethod<jboolean>(
-            "com/ai5qk/qk4phone/AndroidAudioPlayback", "start",
+            "com/w9wdx/qk4phone/AndroidAudioPlayback", "start",
             "(Landroid/content/Context;II)Z", context.object(), 48000, 2);
 }
 
@@ -58,7 +59,7 @@ void stopAndroidPlayback()
 {
     const QJniObject context = QNativeInterface::QAndroidApplication::context();
     if (context.isValid())
-        QJniObject::callStaticMethod<void>("com/ai5qk/qk4phone/AndroidAudioPlayback", "stop",
+        QJniObject::callStaticMethod<void>("com/w9wdx/qk4phone/AndroidAudioPlayback", "stop",
                                             "(Landroid/content/Context;)V", context.object());
 }
 
@@ -74,7 +75,7 @@ qint64 writeAndroidPlayback(const QByteArray &data)
     env->SetByteArrayRegion(bytes, 0, data.size(),
                             reinterpret_cast<const jbyte *>(data.constData()));
     const jint result = QJniObject::callStaticMethod<jint>(
-            "com/ai5qk/qk4phone/AndroidAudioPlayback", "write",
+            "com/w9wdx/qk4phone/AndroidAudioPlayback", "write",
             "(Landroid/content/Context;[BI)I", context.object(), bytes, data.size());
     env->DeleteLocalRef(bytes);
     return result;
@@ -84,7 +85,7 @@ bool startAndroidUsbMicrophone()
 {
     const QJniObject context = QNativeInterface::QAndroidApplication::context();
     return context.isValid() && QJniObject::callStaticMethod<jboolean>(
-            "com/ai5qk/qk4phone/AndroidUsbMicrophone", "start",
+            "com/w9wdx/qk4phone/AndroidUsbMicrophone", "start",
             "(Landroid/content/Context;)Z", context.object());
 }
 
@@ -93,7 +94,7 @@ void stopAndroidUsbMicrophone()
     const QJniObject context = QNativeInterface::QAndroidApplication::context();
     if (context.isValid())
         QJniObject::callStaticMethod<void>(
-                "com/ai5qk/qk4phone/AndroidUsbMicrophone", "stop",
+                "com/w9wdx/qk4phone/AndroidUsbMicrophone", "stop",
                 "(Landroid/content/Context;)V", context.object());
 }
 
@@ -109,7 +110,7 @@ QByteArray readAndroidUsbMicrophone(int maximumBytes)
         return {};
 
     const jint read = QJniObject::callStaticMethod<jint>(
-            "com/ai5qk/qk4phone/AndroidUsbMicrophone", "read",
+            "com/w9wdx/qk4phone/AndroidUsbMicrophone", "read",
             "(Landroid/content/Context;[BI)I", context.object(), bytes, maximumBytes);
 
     QByteArray pcm16;
@@ -161,6 +162,10 @@ AudioEngine::AudioEngine(QObject *parent)
     m_micPollTimer = new QTimer(this);
     m_micPollTimer->setInterval(10); // Poll every 10ms for low latency
     connect(m_micPollTimer, &QTimer::timeout, this, &AudioEngine::onMicDataReady);
+
+    m_sstvPacerTimer = new QTimer(this);
+    m_sstvPacerTimer->setTimerType(Qt::PreciseTimer);
+    connect(m_sstvPacerTimer, &QTimer::timeout, this, &AudioEngine::onSstvPacer);
 
     m_feedTimer = new QTimer(this);
     m_feedTimer->setInterval(FEED_INTERVAL_MS);
@@ -238,6 +243,7 @@ void AudioEngine::stop() {
     resetOutputResampler();
 
     m_pttActive.store(false, std::memory_order_release);
+    stopSstvTransmit();
     m_txSequence = 0;
     closeMic();
 
@@ -829,6 +835,61 @@ void AudioEngine::setFrameSamples(int samples) {
     m_frameSamples.store(samples, std::memory_order_relaxed);
 }
 
+void AudioEngine::prepareSstvTransmit(const QImage &frame, int modeId,
+                                      const QString &morseId, int morseWpm,
+                                      const QString &fskId,
+                                      quint64 generation) {
+    m_sstvGeneration = generation;
+    if (m_sstvActive.load(std::memory_order_acquire)) {
+        emit sstvPrepared(false, QStringLiteral("SSTV transmission is already active."), 0, generation);
+        return;
+    }
+    QString error;
+    constexpr int SstvPreRollMs = 400;
+    constexpr int SstvPostRollMs = 300;
+    const bool ready = m_sstvEncoder.begin(frame, static_cast<SstvModeId>(modeId), &error,
+                                           morseId, morseWpm, fskId,
+                                           SstvPreRollMs, SstvPostRollMs);
+    m_sstvPrepared = ready;
+    emit sstvPrepared(ready, error, ready ? m_sstvEncoder.totalSamples() : 0, generation);
+}
+
+void AudioEngine::beginSstvTransmit() {
+    if (!m_sstvPrepared || m_sstvActive.exchange(true, std::memory_order_acq_rel))
+        return;
+
+    // Each modem transmission starts with a clean codec history and packet
+    // sequence. Speech from an earlier PTT session must not influence the
+    // first SSTV leader packet.
+    m_txSequence = 0;
+    if (m_opusEncoder && !m_opusEncoder->reset()) {
+        const quint64 generation = m_sstvGeneration;
+        m_sstvActive.store(false, std::memory_order_release);
+        m_sstvPrepared = false;
+        emit sstvFailed(QStringLiteral("The K4 audio encoder could not be reset for SSTV."), generation);
+        return;
+    }
+
+    // Do not call setPttActive(true): it opens Android microphone capture.
+    // SSTV is program audio and must keep the mic fully out of the path.
+    const int frameSamples = m_frameSamples.load(std::memory_order_relaxed);
+    m_sstvPacerTimer->start(qMax(1, qRound(1000.0 * frameSamples / SstvEncoder::SampleRate)));
+}
+
+void AudioEngine::stopSstvTransmit() {
+    const bool wasActive = m_sstvActive.exchange(false, std::memory_order_acq_rel);
+    if (m_sstvPacerTimer)
+        m_sstvPacerTimer->stop();
+    m_sstvPrepared = false;
+    m_sstvEncoder = SstvEncoder();
+    if (wasActive)
+        emit sstvFinished(m_sstvGeneration);
+}
+
+void AudioEngine::requestSstvStop() {
+    m_sstvActive.store(false, std::memory_order_release);
+}
+
 const QByteArray &AudioEngine::resample48kTo12k(const QByteArray &input48k) {
     // Simple 4:1 decimation with averaging filter (48kHz / 4 = 12kHz).
     const float *inputSamples = reinterpret_cast<const float *>(input48k.constData());
@@ -900,10 +961,11 @@ void AudioEngine::onMicDataReady() {
     const int frameSamples = m_frameSamples.load(std::memory_order_relaxed);
     const int frameBytes = frameSamples * static_cast<int>(sizeof(qint16));
     const bool pttActive = m_pttActive.load(std::memory_order_acquire);
+    const bool sstvActive = m_sstvActive.load(std::memory_order_acquire);
     const int encodeMode = m_encodeMode.load(std::memory_order_relaxed);
 
     while (m_micBuffer.size() - m_micReadOffset >= frameBytes) {
-        if (pttActive) {
+        if (pttActive && !sstvActive) {
             const QByteArray frame = QByteArray::fromRawData(m_micBuffer.constData() + m_micReadOffset, frameBytes);
             encodeAndSendFrame(frame, frameSamples, encodeMode);
         }
@@ -915,7 +977,31 @@ void AudioEngine::onMicDataReady() {
     }
 }
 
-void AudioEngine::encodeAndSendFrame(const QByteArray &s16leData, int frameSamples, int encodeMode) {
+void AudioEngine::onSstvPacer() {
+    if (!m_sstvActive.load(std::memory_order_acquire))
+        return;
+
+    const int frameSamples = m_frameSamples.load(std::memory_order_relaxed);
+    QVector<qint16> samples = m_sstvEncoder.nextSamples(frameSamples);
+    if (!samples.isEmpty()) {
+        // K4/Opus packetization requires the configured SL frame size. Pad
+        // only the final packet; encoder progress still reports on-air image
+        // samples and therefore reaches exactly totalSamples.
+        if (samples.size() < frameSamples) {
+            const qsizetype imageSamples = samples.size();
+            samples.resize(frameSamples);
+            std::fill(samples.begin() + imageSamples, samples.end(), 0);
+        }
+        const QByteArray frame(reinterpret_cast<const char *>(samples.constData()),
+                               samples.size() * static_cast<int>(sizeof(qint16)));
+        encodeAndSendFrame(frame, frameSamples, m_encodeMode.load(std::memory_order_relaxed), true);
+    }
+    if (m_sstvEncoder.isComplete())
+        stopSstvTransmit();
+}
+
+void AudioEngine::encodeAndSendFrame(const QByteArray &s16leData, int frameSamples, int encodeMode,
+                                     bool sstvProgram) {
     QByteArray audioData;
     const qint16 *samples = reinterpret_cast<const qint16 *>(s16leData.constData());
     const int sampleCount = s16leData.size() / static_cast<int>(sizeof(qint16));
@@ -947,8 +1033,20 @@ void AudioEngine::encodeAndSendFrame(const QByteArray &s16leData, int frameSampl
         break;
     }
 
-    if (!audioData.isEmpty())
-        emit txPacketReady(Protocol::buildAudioPacket(audioData, m_txSequence++, encodeMode, frameSamples));
+    if (!audioData.isEmpty()) {
+        const QByteArray packet = Protocol::buildAudioPacket(audioData, m_txSequence++, encodeMode, frameSamples);
+        if (sstvProgram)
+            emit sstvPacketReady(packet, m_sstvEncoder.emittedSamples(),
+                                 m_sstvEncoder.totalSamples(), m_sstvEncoder.imageSamples(),
+                                 m_sstvGeneration);
+        else
+            emit txPacketReady(packet);
+    } else if (sstvProgram) {
+        const quint64 generation = m_sstvGeneration;
+        emit sstvFailed(QStringLiteral("The selected K4 audio encoding could not carry SSTV program audio."),
+                        generation);
+        stopSstvTransmit();
+    }
 }
 
 void AudioEngine::setMainVolume(float volume) {

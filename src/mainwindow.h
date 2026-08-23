@@ -10,6 +10,7 @@
 #include <QTimer>
 #include <QThread>
 #include <QStackedWidget>
+#include <atomic>
 #include "network/tcpclient.h"
 #include "settings/radiosettings.h"
 #include "models/radiostate.h"
@@ -61,6 +62,9 @@ class VfoRowWidget;
 class SidetoneGenerator;
 class RadioManagerDialog;
 class QResizeEvent;
+class QImage;
+class SstvScreen;
+class SstvDecoder;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -191,6 +195,13 @@ private:
     QString requestText(const QString &title, const QString &label, const QString &initial, bool *accepted);
     void setPhoneTxInputShieldActive(bool active);
     void updatePhoneTxInputShieldGeometry();
+    void openSstvScreen();
+    void refreshSstvRadioHeader();
+    void startSstvTransmit(const QImage &frame, int modeId);
+    void stopSstvTransmission();
+    void beginSstvTransmitDrain();
+    void finishSstvTransmission();
+    void setSstvRfPower(double watts);
 
     // Band and mini pan helpers
     int getBandFromFrequency(quint64 freq);
@@ -208,6 +219,9 @@ private:
     AudioEngine *m_audioEngine;
     QThread *m_audioThread = nullptr;
     OpusDecoder *m_opusDecoder;
+    SstvDecoder *m_sstvDecoder = nullptr;
+    QThread *m_sstvDecoderThread = nullptr;
+    std::atomic<bool> m_sstvRxArmed{false};
 
     // PTT state
     bool m_pttActive = false;
@@ -316,6 +330,13 @@ private:
     QPushButton *m_phoneTxReleaseButton = nullptr;
     NotificationWidget *m_controlNotificationWidget = nullptr;
     RadioManagerDialog *m_radioManager = nullptr;
+    SstvScreen *m_sstvScreen = nullptr;
+    bool m_sstvTxStarting = false;
+    bool m_sstvTxActive = false;
+    bool m_sstvTxDraining = false;
+    int m_sstvPeakAlc = 0;
+    bool m_sstvAlcWarningShown = false;
+    quint64 m_sstvGeneration = 0;
 
     // Menu system
     MenuModel *m_menuModel;

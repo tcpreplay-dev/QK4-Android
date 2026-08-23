@@ -10,8 +10,6 @@
 class DualControlButton;
 class QGridLayout;
 class QScrollArea;
-class MonOverlay;
-class BalOverlay;
 
 /**
  * SideControlPanel - Left-side vertical control panel for QK4
@@ -73,13 +71,6 @@ public:
     int subVolume() const;
     void setPhoneMicGain(int value);
 
-    // Monitor level (MON overlay)
-    void updateMonitorLevel(int mode, int level);
-    void updateMonitorMode(int mode);
-
-    // Balance (BAL overlay + button)
-    void updateBalance(int mode, int offset);
-
     // Cancel an alternate-action hold when a containing phone panel begins scrolling.
     void cancelPendingLongPress();
 
@@ -122,14 +113,8 @@ signals:
     void subVolumeChanged(int value); // 0-100 (Sub RX / VFO B)
     void phoneMicGainChanged(int value); // 0-100 (local phone/headset input only)
 
-    // SW command signals (MON/NORM/BAL buttons)
-    void swCommandRequested(const QString &command);
-
-    // Monitor level change (ML command)
-    void monLevelChangeRequested(int mode, int level);
-
-    // Balance change (BAL overlay mode toggle or scroll)
-    void balChangeRequested(int mode, int offset);
+    // Restore the current mode's nominal filter passband.
+    void normalizeFilterRequested();
 
 private slots:
     // Group 1: WPM/PWR - handle activation and scrolling
@@ -254,14 +239,9 @@ private:
     QSlider *m_phoneMicGainSlider;
     QLabel *m_phoneMicGainLabel;
 
-    // MON/NORM/BAL buttons (above volume sliders)
-    QPushButton *m_monBtn;
-    QPushButton *m_normBtn;
-    QPushButton *m_balBtn;
-
-    // Overlay widgets
-    MonOverlay *m_monOverlay;
-    BalOverlay *m_balOverlay;
+    // NORM stays with filter controls. K4 MON and BAL are intentionally
+    // omitted from the remote UI; A AF and B AF provide independent levels.
+    QPushButton *m_normBtn = nullptr;
 };
 
 #endif // SIDECONTROLPANEL_H

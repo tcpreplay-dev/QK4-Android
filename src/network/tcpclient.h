@@ -28,6 +28,12 @@ public:
 
     Q_INVOKABLE void sendCAT(const QString &command);
     Q_INVOKABLE void sendRaw(const QByteArray &data);
+    // Program SSTV audio has a dedicated gate so a queued callback cannot
+    // revive TX after STOP.  Microphone packets continue to use sendRaw().
+    Q_INVOKABLE void beginSstvAudioTransmit(quint64 generation);
+    Q_INVOKABLE void sendSstvAudio(const QByteArray &data, int emittedSamples, int totalSamples,
+                                   int imageSamples, quint64 generation);
+    Q_INVOKABLE void stopSstvAudioAndUnkey();
 
     Protocol *protocol() { return m_protocol; }
 
@@ -39,6 +45,12 @@ signals:
     void authenticated();
     void authenticationFailed();
     void latencyChanged(int milliseconds);
+    // This acknowledges that TX; was written on the I/O thread. MainWindow
+    // applies a short fixed key-up guard before releasing program audio.
+    void sstvAudioKeyRequested(quint64 generation);
+    void sstvAudioTransmitFailed(const QString &reason, quint64 generation);
+    void sstvAudioAccepted(int emittedSamples, int totalSamples, int imageSamples,
+                           quint64 generation);
 
 private slots:
     void onSocketConnected();
@@ -78,6 +90,8 @@ private:
     std::atomic<ConnectionState> m_state{Disconnected};
     std::atomic<bool> m_connected{false}; // Thread-safe read for isConnected()
     bool m_authResponseReceived;
+    bool m_sstvAudioGate = false; // I/O-thread only
+    quint64 m_sstvAudioGeneration = 0; // I/O-thread only
 };
 
 #endif // TCPCLIENT_H

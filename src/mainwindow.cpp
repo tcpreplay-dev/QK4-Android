@@ -32,6 +32,8 @@
 #include "ui/dtmfpopup.h"
 #include "ui/txmodepopup.h"
 #include "ui/softwarelistpopup.h"
+#include "ui/dxprefixlistdialog.h"
+#include "ui/sstvscreen.h"
 #include "ui/textdecodewindow.h"
 #include "ui/frequencydisplaywidget.h"
 #include "ui/frequencyentryparser.h"
@@ -41,6 +43,8 @@
 #include "audio/audioengine.h"
 #include "audio/opusdecoder.h"
 #include "audio/sidetonegenerator.h"
+#include "android/sstvorientation.h"
+#include "sstv/sstvdecoder.h"
 #include "hardware/kpoddevice.h"
 #include "hardware/halikeydevice.h"
 #include "hardware/iambickeyer.h"
@@ -232,6 +236,13 @@ QString temperatureStyle(int celsius) {
                                            : K4Styles::Colors::AccentAmber;
     return QString("color: %1; font-size: %2px;").arg(color).arg(K4Styles::Dimensions::FontSizeButton);
 }
+
+// The K4 TX command was already proven to key the radio.  Hold program audio
+// briefly so the SSTV leader does not arrive while the RF/audio path is still
+// changing over; do not make transmission depend on a CAT state echo.
+constexpr int SstvKeyUpGuardMs = 500;
+constexpr int SstvDrainMarginMs = 150;
+constexpr int SstvAlcWarningLevel = 5;
 } // namespace
 
 // Convert K4 tuning step index (VT command, 0-5) to Hz
@@ -323,6 +334,12 @@ MainWindow::MainWindow(QWidget *parent)
     m_audioEngine->moveToThread(m_audioThread);
     m_audioThread->start();
 
+    m_sstvDecoder = new SstvDecoder(nullptr);
+    m_sstvDecoderThread = new QThread(this);
+    m_sstvDecoderThread->setObjectName("SSTV Decoder");
+    m_sstvDecoder->moveToThread(m_sstvDecoderThread);
+    m_sstvDecoderThread->start();
+
     // Move TcpClient (+ Protocol, socket, timers as children) to dedicated I/O thread
     // so network data flows independently of UI work
     m_ioThread = new QThread(this);
@@ -336,6 +353,14 @@ MainWindow::MainWindow(QWidget *parent)
     // "QRhiWidget: No QRhi" errors and blank panadapter display.
     setupUi();
     setupMenuBar();
+
+    connect(qApp, &QGuiApplication::applicationStateChanged, this,
+            [this](Qt::ApplicationState state) {
+        if (state != Qt::ApplicationActive && m_sstvScreen)
+            m_sstvScreen->flushDraft();
+        if (state != Qt::ApplicationActive && (m_sstvTxActive || m_sstvTxStarting))
+            stopSstvTransmission();
+    });
 
     // Phone replacement for hovering over RIT/XIT and rolling a mouse wheel.
     // A normal tap still toggles the label; a deliberate hold opens the
@@ -1517,6 +1542,17 @@ MainWindow::MainWindow(QWidget *parent)
 
     // TX Meter data -> update power displays and VFO multifunction meters during TX
     connect(m_radioState, &RadioState::txMeterChanged, this, [this](int alc, int comp, double fwdPower, double swr) {
+        if (m_sstvTxActive) {
+            m_sstvPeakAlc = qMax(m_sstvPeakAlc, alc);
+            if (alc >= SstvAlcWarningLevel && !m_sstvAlcWarningShown) {
+                m_sstvAlcWarningShown = true;
+                if (m_sstvScreen) {
+                    m_sstvScreen->setTransmitWarning(
+                        QStringLiteral("ALC HIGH %1 • REDUCE K4 DATA/LINE INPUT LEVEL BELOW 5").arg(alc));
+                }
+            }
+        }
+
         // Update status bar power label
         QString powerStr;
         if (fwdPower < 10.0) {
@@ -2184,6 +2220,10 @@ MainWindow::MainWindow(QWidget *parent)
             [this](const QByteArray &payload) {
                 QByteArray pcmData = m_opusDecoder->decodeK4Packet(payload);
                 if (!pcmData.isEmpty()) {
+                    if (m_sstvRxArmed.load(std::memory_order_acquire)) {
+                        QMetaObject::invokeMethod(m_sstvDecoder, "consumeStereoFloat", Qt::QueuedConnection,
+                                                  Q_ARG(QByteArray, pcmData));
+                    }
                     m_audioEngine->enqueueAudio(pcmData);
                 }
             });
@@ -2378,11 +2418,26 @@ MainWindow::MainWindow(QWidget *parent)
 
     // Forward CAT commands from external apps to the real K4
     connect(m_catServer, &CatServer::catCommandReceived, this,
-            [this](const QString &command) { m_tcpClient->sendCAT(command); });
+            [this](const QString &command) {
+        const QString normalized = command.trimmed().toUpper();
+        if (m_sstvTxActive || m_sstvTxStarting) {
+            // SSTV exclusively owns TX. Do not let the generic CAT forwarder
+            // bypass the pttRequested guard below.
+            if (normalized.startsWith(QStringLiteral("TX")))
+                return;
+            if (normalized.startsWith(QStringLiteral("RX"))) {
+                stopSstvTransmission();
+                return;
+            }
+        }
+        m_tcpClient->sendCAT(command);
+    });
 
     // TX;/RX; from external apps controls audio input gate
     // Audio stream itself triggers K4 TX - timing-critical for FT8/FT4
     connect(m_catServer, &CatServer::pttRequested, this, [this](bool on) {
+        if (on && (m_sstvTxActive || m_sstvTxStarting))
+            return;
         // Match AudioController in mainline: reject PTT-on while disconnected,
         // but always honor PTT-off so a stale gate can be cleared.
         if (on && !m_tcpClient->isConnected())
@@ -2430,9 +2485,29 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 MainWindow::~MainWindow() {
+    // SSTV owns a keyed program-audio path. Close its producer before the
+    // network connection is torn down so shutdown cannot leave a queued tone
+    // stream or a keyed K4 behind.
+    if (m_audioEngine && m_audioThread) {
+        m_audioEngine->requestSstvStop();
+        QMetaObject::invokeMethod(m_audioEngine, "stopSstvTransmit", Qt::BlockingQueuedConnection);
+    }
+    if (m_tcpClient && m_ioThread) {
+        QMetaObject::invokeMethod(m_tcpClient, "stopSstvAudioAndUnkey", Qt::BlockingQueuedConnection);
+    }
+    setSstvOrientationEnabled(false);
+
     // Close HaliKey FIRST — its closePort() emits disconnected(), which triggers
     // lambdas that call invokeMethod on m_sidetoneGenerator/m_tcpClient.
     // Must happen while those objects are still alive.
+    m_sstvRxArmed.store(false, std::memory_order_release);
+    if (m_sstvDecoderThread) {
+        m_sstvDecoderThread->quit();
+        m_sstvDecoderThread->wait(2000);
+    }
+    delete m_sstvDecoder;
+    m_sstvDecoder = nullptr;
+
     if (m_halikeyDevice) {
         m_halikeyDevice->closePort();
     }
@@ -3164,24 +3239,11 @@ void MainWindow::setupUi() {
         RadioSettings::instance()->setVolume(value); // Persist setting
     });
 
-    // Connect sub volume slider to AudioEngine (Sub RX / VFO B)
-    // In BAL mode, this slider controls L/R balance offset instead of sub volume
+    // The B AF slider always controls Sub RX / VFO B volume. BAL is not exposed
+    // by the mobile control drawer and must never repurpose this control.
     connect(m_sideControlPanel, &SideControlPanel::subVolumeChanged, this, [this](int value) {
-        if (m_audioEngine) {
-            if (m_radioState->balanceMode() == 1) {
-                // BAL mode: slider controls L/R balance (0-100 maps to -50..+50)
-                int offset = value - 50;
-                m_audioEngine->setBalanceOffset(offset);
-                // Send BL command to radio with current mode and new offset
-                QString sign = offset >= 0 ? "+" : "-";
-                QString cmd = QString("BL1%1%2;").arg(sign).arg(qAbs(offset), 2, 10, QChar('0'));
-                m_tcpClient->sendCAT(cmd);
-                m_radioState->setBalance(1, offset);
-            } else {
-                // NOR mode: slider controls sub RX volume
-                m_audioEngine->setSubVolume(value / 100.0f);
-            }
-        }
+        if (m_audioEngine)
+            m_audioEngine->setSubVolume(value / 100.0f);
         RadioSettings::instance()->setSubVolume(value); // Persist setting
     });
     connect(m_sideControlPanel, &SideControlPanel::phoneMicGainChanged, this, [this](int value) {
@@ -3444,47 +3506,11 @@ void MainWindow::setupUi() {
         m_tcpClient->sendCAT("SW157;");
     });
 
-    // Connect MON/NORM/BAL SW commands
-    connect(m_sideControlPanel, &SideControlPanel::swCommandRequested, m_tcpClient, &TcpClient::sendCAT);
-
-    // Connect monitor level change (ML command)
-    connect(m_sideControlPanel, &SideControlPanel::monLevelChangeRequested, this, [this](int mode, int level) {
-        QString cmd = QString("ML%1%2;").arg(mode).arg(level, 3, 10, QChar('0'));
-        m_tcpClient->sendCAT(cmd);
-        // Optimistic update
-        m_radioState->setMonitorLevel(mode, level);
-    });
-
-    // Update MON overlay when RadioState changes
-    connect(m_radioState, &RadioState::monitorLevelChanged, m_sideControlPanel, &SideControlPanel::updateMonitorLevel);
-    connect(m_radioState, &RadioState::modeChanged, this, [this](RadioState::Mode mode) {
-        // Update MON overlay mode based on current operating mode
-        int monMode = 2; // Default to voice
-        if (mode == RadioState::CW || mode == RadioState::CW_R) {
-            monMode = 0;
-        } else if (mode == RadioState::DATA || mode == RadioState::DATA_R) {
-            monMode = 1;
-        }
-        m_sideControlPanel->updateMonitorMode(monMode);
-    });
-
-    // Connect balance wheel signal (BL command)
-    connect(m_sideControlPanel, &SideControlPanel::balChangeRequested, this, [this](int mode, int offset) {
-        QString sign = offset >= 0 ? "+" : "-";
-        QString cmd = QString("BL%1%2%3;").arg(mode).arg(sign).arg(qAbs(offset), 2, 10, QChar('0'));
-        m_tcpClient->sendCAT(cmd);
-        m_radioState->setBalance(mode, offset);
-    });
-
-    // Update BAL overlay and button when RadioState changes
-    connect(m_radioState, &RadioState::balanceChanged, m_sideControlPanel, &SideControlPanel::updateBalance);
-
-    // Forward balance state to audio engine for L/R routing
-    connect(m_radioState, &RadioState::balanceChanged, this, [this](int mode, int offset) {
-        if (m_audioEngine) {
-            m_audioEngine->setBalanceMode(mode);
-            m_audioEngine->setBalanceOffset(offset);
-        }
+    // NORM is placed with BW/SHFT and performs the K4's nominal-passband
+    // action. K4 MON is intentionally not exposed in the remote control UI.
+    connect(m_sideControlPanel, &SideControlPanel::normalizeFilterRequested, this, [this]() {
+        queueControlFeedback("FILTER_NORM", "Filter passband normalized");
+        m_tcpClient->sendCAT("SW129;");
     });
 
     // Forward audio mix routing (MX command) to audio engine
@@ -3813,6 +3839,7 @@ void MainWindow::setupUi() {
     // then TcpClient safely marshals them to its I/O thread. This keeps PTT
     // continuous even while the phone UI is repainting the panadapter.
     connect(m_audioEngine, &AudioEngine::txPacketReady, m_tcpClient, &TcpClient::sendRaw);
+    connect(m_audioEngine, &AudioEngine::sstvPacketReady, m_tcpClient, &TcpClient::sendSstvAudio);
 
     // The K4 does not echo SL changes. RadioState is updated optimistically on
     // connect and remains the single source for TX frame sizing thereafter.
@@ -6407,6 +6434,10 @@ void MainWindow::showFrequencyEntry(bool vfoB) {
 }
 
 void MainWindow::onPttPressed() {
+    if (m_sstvTxActive || m_sstvTxStarting) {
+        showControlFeedback("SSTV TRANSMIT ACTIVE — USE STOP SSTV");
+        return;
+    }
     if (!m_tcpClient->isConnected()) {
         return;
     }
@@ -6640,6 +6671,9 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
     QMainWindow::resizeEvent(event);
     if (m_radioManager && centralWidget()) {
         m_radioManager->setGeometry(centralWidget()->rect());
+    }
+    if (m_sstvScreen && m_sstvScreen->isVisible()) {
+        m_sstvScreen->setGeometry(rect());
     }
     updatePhoneTxInputShieldGeometry();
 }
@@ -7212,7 +7246,9 @@ void MainWindow::onFnFunctionTriggered(const QString &functionId) {
     qDebug() << "Fn function triggered:" << functionId;
 
     // Handle built-in functions
-    if (functionId == MacroIds::ScrnCap) {
+    if (functionId == MacroIds::Sstv) {
+        openSstvScreen();
+    } else if (functionId == MacroIds::ScrnCap) {
         // SS0; triggers K4 screenshot (saved to internal SD card)
         if (m_tcpClient && m_tcpClient->isConnected()) {
             m_tcpClient->sendCAT("SS0;");
@@ -7228,12 +7264,325 @@ void MainWindow::onFnFunctionTriggered(const QString &functionId) {
         showInWindowMessage(centralWidget(), "UPDATE",
                             "Radio firmware installation is intentionally not started remotely from QK4 Mobile.");
     } else if (functionId == MacroIds::DxList) {
-        showInWindowMessage(centralWidget(), "DX LIST",
-                            "DX List has no documented K4 remote command or data feed.");
+        closeAllPopups();
+        showDxPrefixList(centralWidget());
     } else {
         // User-configurable macro - execute CAT command
         executeMacro(functionId);
     }
+}
+
+void MainWindow::openSstvScreen() {
+    closeAllPopups();
+    if (!m_sstvScreen) {
+        // SSTV is an application screen, not a console overlay. Parent it to
+        // the main window so its opaque canvas covers every radio-console
+        // child rather than inheriting the central console's rounded/inset
+        // surface and exposing sibling widgets at the edges.
+        m_sstvScreen = new SstvScreen(this);
+        connect(m_sstvScreen, &SstvScreen::closeRequested, this, [this]() {
+            if (m_sstvTxActive || m_sstvTxStarting)
+                stopSstvTransmission();
+            setSstvOrientationEnabled(false);
+            m_sstvRxArmed.store(false, std::memory_order_release);
+            m_sstvScreen->hide();
+            if (centralWidget())
+                centralWidget()->show();
+        });
+        connect(m_sstvScreen, &SstvScreen::transmitRequested, this, &MainWindow::startSstvTransmit);
+        connect(m_sstvScreen, &SstvScreen::stopRequested, this, &MainWindow::stopSstvTransmission);
+        connect(m_sstvScreen, &SstvScreen::powerRequested, this, &MainWindow::setSstvRfPower);
+        connect(m_radioState, &RadioState::rfPowerChanged, m_sstvScreen,
+                [this](double watts, bool) { m_sstvScreen->setRfPower(watts); });
+        const auto refreshSstvHeader = [this]() { refreshSstvRadioHeader(); };
+        connect(m_radioState, &RadioState::frequencyChanged, m_sstvScreen,
+                refreshSstvHeader);
+        connect(m_radioState, &RadioState::frequencyBChanged, m_sstvScreen,
+                refreshSstvHeader);
+        connect(m_radioState, &RadioState::modeChanged, m_sstvScreen,
+                refreshSstvHeader);
+        connect(m_radioState, &RadioState::modeBChanged, m_sstvScreen,
+                refreshSstvHeader);
+        connect(m_radioState, &RadioState::dataSubModeChanged, m_sstvScreen,
+                refreshSstvHeader);
+        connect(m_radioState, &RadioState::dataSubModeBChanged, m_sstvScreen,
+                refreshSstvHeader);
+        connect(m_radioState, &RadioState::splitChanged, m_sstvScreen,
+                refreshSstvHeader);
+
+        connect(m_audioEngine, &AudioEngine::sstvPrepared, this,
+                [this](bool ready, const QString &error, int totalSamples, quint64 generation) {
+            Q_UNUSED(totalSamples)
+            if (generation != m_sstvGeneration || !m_sstvTxStarting)
+                return;
+            if (!ready) {
+                m_sstvTxStarting = false;
+                m_sstvScreen->setTransmitting(false);
+                m_sstvScreen->setTransmitStatus(error.isEmpty() ? QStringLiteral("SSTV image preparation failed.") : error);
+                const bool resumeRx = m_sstvScreen && m_sstvScreen->isVisible();
+                m_sstvRxArmed.store(resumeRx, std::memory_order_release);
+                if (resumeRx)
+                    QMetaObject::invokeMethod(m_sstvDecoder, "resetAuto", Qt::QueuedConnection);
+                return;
+            }
+            m_sstvScreen->setTransmitStatus(QStringLiteral("KEYING K4 • PROGRAM AUDIO READY"));
+            QMetaObject::invokeMethod(m_tcpClient, "beginSstvAudioTransmit", Qt::QueuedConnection,
+                                      Q_ARG(quint64, generation));
+        });
+        connect(m_tcpClient, &TcpClient::sstvAudioKeyRequested, this, [this](quint64 generation) {
+            if (generation != m_sstvGeneration || !m_sstvTxStarting)
+                return;
+            m_sstvScreen->setTransmitStatus(QStringLiteral("K4 KEY-UP GUARD • PROGRAM AUDIO READY"));
+            qInfo() << "SSTV TX command written; holding audio for" << SstvKeyUpGuardMs << "ms"
+                    << "generation" << generation;
+            QTimer::singleShot(SstvKeyUpGuardMs, this, [this, generation]() {
+                if (generation != m_sstvGeneration || !m_sstvTxStarting)
+                    return;
+                if (!m_tcpClient->isConnected()) {
+                    stopSstvTransmission();
+                    if (m_sstvScreen)
+                        m_sstvScreen->setTransmitStatus(
+                            QStringLiteral("K4 CONNECTION LOST • TRANSMISSION CANCELLED"));
+                    return;
+                }
+                m_sstvTxStarting = false;
+                m_sstvTxActive = true;
+                m_sstvTxDraining = false;
+                m_sstvPeakAlc = 0;
+                m_sstvAlcWarningShown = false;
+                m_sstvScreen->setTransmitWarning(QString());
+                const QString callsign = m_sstvScreen->operatorCallsign();
+                m_sstvScreen->setTransmitting(
+                    true, callsign.isEmpty()
+                              ? QStringLiteral("SSTV AUDIO PREROLL")
+                              : QStringLiteral("SSTV AUDIO PREROLL • %1").arg(callsign));
+                qInfo() << "SSTV TX key-up guard complete; starting program audio"
+                        << "generation" << generation;
+                QMetaObject::invokeMethod(m_audioEngine, "beginSstvTransmit", Qt::QueuedConnection);
+            });
+        });
+        connect(m_tcpClient, &TcpClient::sstvAudioTransmitFailed, this,
+                [this](const QString &reason, quint64 generation) {
+            if (generation != m_sstvGeneration || (!m_sstvTxStarting && !m_sstvTxActive))
+                return;
+            stopSstvTransmission();
+            if (m_sstvScreen)
+                m_sstvScreen->setTransmitStatus(reason);
+        });
+        connect(m_audioEngine, &AudioEngine::sstvFailed, this,
+                [this](const QString &reason, quint64 generation) {
+            if (generation != m_sstvGeneration || (!m_sstvTxStarting && !m_sstvTxActive))
+                return;
+            stopSstvTransmission();
+            if (m_sstvScreen)
+                m_sstvScreen->setTransmitStatus(reason);
+        });
+        connect(m_tcpClient, &TcpClient::sstvAudioAccepted, this,
+                [this](int emittedSamples, int totalSamples, int imageSamples,
+                       quint64 generation) {
+            if (generation != m_sstvGeneration || !m_sstvTxActive || !m_sstvScreen)
+                return;
+            m_sstvScreen->setTransmitProgress(emittedSamples, totalSamples, imageSamples);
+            // The encoder includes a post-roll silence interval. Once its
+            // final packet reaches the K4 socket, retain PTT long enough for
+            // the final SL-sized packet and remote buffer to play completely.
+            if (totalSamples > 0 && emittedSamples >= totalSamples)
+                beginSstvTransmitDrain();
+        });
+        connect(m_audioEngine, &AudioEngine::sstvFinished, this,
+                [](quint64) {
+            // Normal completion is acknowledged by sstvAudioAccepted above.
+            // STOP and failure paths already own their lifecycle cleanup.
+        });
+        connect(m_tcpClient, &TcpClient::disconnected, this, [this]() {
+            if (m_sstvTxActive || m_sstvTxStarting)
+                stopSstvTransmission();
+        });
+        connect(m_radioState, &RadioState::transmitStateChanged, m_sstvScreen,
+                [this](bool transmitting) {
+            // A reported RX transition still stops an active transmission,
+            // but an initial/stale RX state must not defeat the key-up guard.
+            if (!transmitting && m_sstvTxActive) {
+                stopSstvTransmission();
+                if (m_sstvScreen)
+                    m_sstvScreen->setTransmitStatus(
+                        QStringLiteral("K4 RETURNED TO RX • SSTV TRANSMISSION STOPPED"));
+            }
+        });
+        connect(m_sstvDecoder, &SstvDecoder::statusChanged,
+                m_sstvScreen, &SstvScreen::setReceiveStatus);
+        connect(m_sstvDecoder, &SstvDecoder::inputLevelChanged,
+                m_sstvScreen, &SstvScreen::setReceiveInputLevel);
+        connect(m_sstvDecoder, &SstvDecoder::inputStreamChanged,
+                m_sstvScreen, &SstvScreen::setReceiveStreamActive);
+        connect(m_sstvDecoder, &SstvDecoder::modeDetected, m_sstvScreen,
+                [this](int, const QString &) {
+            // Auto RX remains active while the operator prepares a TX image.
+            // Bring an identified incoming image to the foreground unless
+            // this station is already starting or sending SSTV.
+            if (m_sstvScreen && m_sstvScreen->isVisible()
+                && !m_sstvTxActive && !m_sstvTxStarting)
+                m_sstvScreen->returnToAutoReceive();
+        });
+        connect(m_sstvDecoder, &SstvDecoder::imageUpdated,
+                m_sstvScreen, &SstvScreen::setReceiveImage);
+        connect(m_sstvDecoder, &SstvDecoder::imageCompleted, this,
+                [this](const QImage &image, int modeId, const QString &slantStatus) {
+            if (m_sstvScreen)
+                m_sstvScreen->completeReceiveImage(image, modeId, slantStatus,
+                                                   static_cast<qint64>(m_radioState->frequency()));
+        });
+        connect(m_sstvDecoder, &SstvDecoder::callsignDetected,
+                m_sstvScreen, &SstvScreen::receiveCallsignDetected);
+    }
+
+    m_sstvScreen->setRfPower(m_radioState->rfPower());
+    refreshSstvRadioHeader();
+    m_sstvScreen->returnToAutoReceive();
+    m_sstvRxArmed.store(true, std::memory_order_release);
+    QMetaObject::invokeMethod(m_sstvDecoder, "resetAuto", Qt::QueuedConnection);
+    // Suspend the complete radio-console widget tree while SSTV owns the app
+    // surface. This prevents independently managed console children from
+    // bleeding through at the sides of the SSTV canvas.
+    if (centralWidget())
+        centralWidget()->hide();
+    m_sstvScreen->setGeometry(rect());
+    m_sstvScreen->show();
+    m_sstvScreen->raise();
+    m_sstvScreen->setFocus();
+    // Request sensor orientation after the SSTV surface is visible. Qt can
+    // reapply the manifest orientation while updating its top-level window;
+    // a short second request makes the Activity policy authoritative.
+    setSstvOrientationEnabled(true);
+    QTimer::singleShot(250, this, [this]() {
+        if (m_sstvScreen && m_sstvScreen->isVisible())
+            setSstvOrientationEnabled(true);
+    });
+}
+
+void MainWindow::refreshSstvRadioHeader() {
+    if (!m_sstvScreen || !m_radioState)
+        return;
+    const bool split = m_radioState->splitEnabled();
+    const auto frequencyText = [this](quint64 frequency) {
+        return frequency > 0 ? formatFrequency(frequency) : QString();
+    };
+    m_sstvScreen->setRadioOperatingState(
+        frequencyText(m_radioState->vfoA()), m_radioState->modeStringFull(),
+        frequencyText(split ? m_radioState->vfoB() : m_radioState->vfoA()),
+        split ? m_radioState->modeStringFullB() : m_radioState->modeStringFull());
+}
+
+void MainWindow::startSstvTransmit(const QImage &frame, int modeId) {
+    if (!m_sstvScreen || frame.isNull())
+        return;
+    if (!m_tcpClient->isConnected()) {
+        m_sstvScreen->setTransmitStatus(QStringLiteral("CONNECT TO THE K4 BEFORE TRANSMITTING."));
+        return;
+    }
+    if (m_pttActive || m_radioState->isTransmitting() || m_sstvTxActive || m_sstvTxStarting) {
+        m_sstvScreen->setTransmitStatus(QStringLiteral("K4 IS ALREADY TRANSMITTING."));
+        return;
+    }
+
+    const quint64 generation = ++m_sstvGeneration;
+    m_sstvTxStarting = true;
+    m_sstvTxActive = false;
+    m_sstvTxDraining = false;
+    m_sstvPeakAlc = 0;
+    m_sstvAlcWarningShown = false;
+    m_sstvRxArmed.store(false, std::memory_order_release);
+    m_sstvScreen->setTransmitWarning(QString());
+    m_sstvScreen->setTransmitting(true, QStringLiteral("PREPARING SSTV PROGRAM AUDIO"));
+    const QString morseId = m_sstvScreen->sendCallsignCw()
+                                ? m_sstvScreen->operatorCallsign() : QString();
+    const QString fskId = m_sstvScreen->sendCallsignFsk()
+                              ? m_sstvScreen->operatorCallsign() : QString();
+    const int morseWpm = m_sstvScreen->callsignCwWpm();
+    QMetaObject::invokeMethod(m_audioEngine, "prepareSstvTransmit", Qt::QueuedConnection,
+                              Q_ARG(QImage, frame), Q_ARG(int, modeId),
+                              Q_ARG(QString, morseId), Q_ARG(int, morseWpm),
+                              Q_ARG(QString, fskId),
+                              Q_ARG(quint64, generation));
+}
+
+void MainWindow::stopSstvTransmission() {
+    if (!m_sstvTxActive && !m_sstvTxStarting)
+        return;
+
+    // First close the producer's atomic gate, then close the I/O gate and
+    // unkey. Queued audio packets that arrive afterward are ignored by TCP.
+    m_audioEngine->requestSstvStop();
+    ++m_sstvGeneration;
+    QMetaObject::invokeMethod(m_tcpClient, "stopSstvAudioAndUnkey", Qt::QueuedConnection);
+    QMetaObject::invokeMethod(m_audioEngine, "stopSstvTransmit", Qt::QueuedConnection);
+    m_sstvTxStarting = false;
+    m_sstvTxActive = false;
+    m_sstvTxDraining = false;
+    if (m_sstvScreen) {
+        m_sstvScreen->setTransmitting(false);
+        if (m_sstvPeakAlc >= SstvAlcWarningLevel) {
+            m_sstvScreen->setTransmitStatus(
+                QStringLiteral("LAST TX PEAK ALC %1 • REDUCE K4 DATA/LINE INPUT LEVEL BELOW 5")
+                    .arg(m_sstvPeakAlc));
+        }
+        m_sstvScreen->returnToAutoReceive();
+    }
+    const bool resumeRx = m_sstvScreen && m_sstvScreen->isVisible();
+    m_sstvRxArmed.store(resumeRx, std::memory_order_release);
+    if (resumeRx)
+        QMetaObject::invokeMethod(m_sstvDecoder, "resetAuto", Qt::QueuedConnection);
+}
+
+void MainWindow::beginSstvTransmitDrain() {
+    if (!m_sstvTxActive || m_sstvTxDraining)
+        return;
+    m_sstvTxDraining = true;
+    if (m_sstvScreen)
+        m_sstvScreen->setTransmitStatus(QStringLiteral("FINAL AUDIO BUFFER • HOLDING K4 IN TX"));
+
+    const int frameSamples = streamingLatencyToFrameSamples(m_currentRadio.streamingLatency);
+    const int frameDurationMs = (1000 * frameSamples + SstvEncoder::SampleRate - 1)
+                                / SstvEncoder::SampleRate;
+    const int drainMs = frameDurationMs + SstvDrainMarginMs;
+    const quint64 generation = m_sstvGeneration;
+    QTimer::singleShot(drainMs, this, [this, generation]() {
+        if (generation == m_sstvGeneration && m_sstvTxActive && m_sstvTxDraining)
+            finishSstvTransmission();
+    });
+}
+
+void MainWindow::finishSstvTransmission() {
+    ++m_sstvGeneration;
+    QMetaObject::invokeMethod(m_tcpClient, "stopSstvAudioAndUnkey", Qt::QueuedConnection);
+    m_sstvTxStarting = false;
+    m_sstvTxActive = false;
+    m_sstvTxDraining = false;
+    if (m_sstvScreen) {
+        m_sstvScreen->setTransmitting(false);
+        if (m_sstvPeakAlc >= SstvAlcWarningLevel) {
+            m_sstvScreen->setTransmitStatus(
+                QStringLiteral("TX COMPLETE • PEAK ALC %1 HIGH • REDUCE K4 DATA/LINE INPUT LEVEL")
+                    .arg(m_sstvPeakAlc));
+        }
+        m_sstvScreen->returnToAutoReceive();
+    }
+    const bool resumeRx = m_sstvScreen && m_sstvScreen->isVisible();
+    m_sstvRxArmed.store(resumeRx, std::memory_order_release);
+    if (resumeRx)
+        QMetaObject::invokeMethod(m_sstvDecoder, "resetAuto", Qt::QueuedConnection);
+}
+
+void MainWindow::setSstvRfPower(double watts) {
+    if (!m_tcpClient || !m_tcpClient->isConnected() || m_sstvTxActive || m_sstvTxStarting)
+        return;
+    const double power = qBound(1.0, watts, 110.0);
+    if (power <= 10.0) {
+        m_tcpClient->sendCAT(QString("PC%1L;").arg(qRound(power * 10), 3, 10, QChar('0')));
+    } else {
+        m_tcpClient->sendCAT(QString("PC%1H;").arg(qRound(power), 3, 10, QChar('0')));
+    }
+    m_radioState->setRfPower(power);
 }
 
 void MainWindow::executeMacro(const QString &functionId) {

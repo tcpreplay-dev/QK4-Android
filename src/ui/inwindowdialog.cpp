@@ -3,6 +3,7 @@
 #include "k4styles.h"
 
 #include <QEventLoop>
+#include <QEvent>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QKeyEvent>
@@ -12,6 +13,8 @@
 
 InWindowDialog::InWindowDialog(QWidget *parent)
     : QWidget(parent) {
+    if (parent)
+        parent->installEventFilter(this);
     setObjectName("inWindowDialogOverlay");
     setAttribute(Qt::WA_StyledBackground, true);
     setFocusPolicy(Qt::StrongFocus);
@@ -41,14 +44,15 @@ QWidget *InWindowDialog::contentWidget() const {
 }
 
 void InWindowDialog::setPanelSize(const QSize &size) {
-    m_panel->setFixedSize(size);
+    m_preferredPanelSize = size;
+    fitToParent();
 }
 
 int InWindowDialog::exec() {
     if (!parentWidget())
         return Rejected;
 
-    setGeometry(parentWidget()->rect());
+    fitToParent();
     m_result = Rejected;
     show();
     raise();
@@ -59,6 +63,27 @@ int InWindowDialog::exec() {
     eventLoop.exec();
     m_eventLoop = nullptr;
     return m_result;
+}
+
+bool InWindowDialog::eventFilter(QObject *watched, QEvent *event) {
+    if (watched == parentWidget() && event->type() == QEvent::Resize)
+        fitToParent();
+    return QWidget::eventFilter(watched, event);
+}
+
+void InWindowDialog::fitToParent() {
+    if (!parentWidget() || !m_panel)
+        return;
+    setGeometry(parentWidget()->rect());
+    if (!m_preferredPanelSize.isValid())
+        return;
+    const QSize available(qMax(1, parentWidget()->width() - 16),
+                          qMax(1, parentWidget()->height() - 12));
+    const QSize panelSize = m_preferredPanelSize.boundedTo(available);
+    if (m_panel->size() != panelSize) {
+        m_panel->setFixedSize(panelSize);
+        emit panelResized(panelSize);
+    }
 }
 
 void InWindowDialog::accept() {

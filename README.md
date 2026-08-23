@@ -2,7 +2,7 @@
 
 QK4 Android is a phone-focused Android client for Elecraft K4 transceivers. It preserves the proven radio-control, TCP/TLS, panadapter-stream, and TX/RX audio architecture of QK4 while replacing its desktop-oriented interaction model with a landscape touch interface.
 
-The application is under active development and is intended for testing with an Elecraft K4/K4D on the same network. Version 0.8.3 is the current ARM64 release.
+The application is under active development and is intended for testing with an Elecraft K4/K4D on the same network. Version 1.0 is the current ARM64 release.
 
 ![QK4 Mobile v0.8.0 console](https://github.com/worldwidedx/QK4-Android/releases/download/v0.8.0/QK4-Mobile-v0.8.0-Screenshot.png)
 
@@ -37,6 +37,9 @@ to remote clients, such as BAND/MEM, remain outside the application's control.
 - RIT/XIT jog control
 - CW text decoding
 - F1-F8 macro editing and execution
+- Integrated SSTV transmit and receive with 22 modes, image composition,
+  templates, automatic reception, callsign identification, and RX history
+- Touch-scrollable DX prefix reference with natural alphanumeric sorting and prefix/country search
 - Android landscape layout and touch-safe scrolling
 - Local non-decaying Peak Hold and local WTR CLRS waterfall brightness control
 - Release-signed APK distribution support
@@ -49,6 +52,7 @@ See [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for the verified state and 
 |---|---|
 | Platform | Android 8.0 (API 26) or later |
 | ABI | ARM64 (`arm64-v8a`) |
+| Android package | `com.w9wdx.qk4phone` |
 | UI | Landscape touch UI; the compact phone layout is temporarily used on all display sizes, including tablets |
 | Framework | Qt 6.11.1 |
 | Android API | Minimum 26, target 34 |
@@ -89,6 +93,12 @@ To install on a connected phone with USB debugging enabled:
 build-android.cmd -Action Install
 ```
 
+Development phones that still contain the former `com.ai5qk.qk4phone` debug
+package can migrate its private QK4 settings and SSTV data once before the old
+package is removed. Follow the guarded procedure in
+[docs/BUILD_ANDROID_WINDOWS.md](docs/BUILD_ANDROID_WINDOWS.md); the migration
+utility verifies every copied file before it permits removal.
+
 The script discovers normal Qt and Android SDK locations. Any nonstandard location can be supplied through these environment variables:
 
 | Variable | Purpose |
@@ -110,6 +120,7 @@ For a transfer checklist, including what is intentionally *not* stored in Git, s
 
 ```text
 android/                  Android manifest, Gradle configuration, and icons
+scripts/                  Guarded development and migration utilities
 src/audio/                Opus and Qt audio engine
 src/controllers/          UI and radio orchestration
 src/dsp/                  Spectrum, panadapter, and waterfall rendering

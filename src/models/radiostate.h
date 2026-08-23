@@ -1035,6 +1035,7 @@ private:
     void handleTM(const QString &cmd);    // TX Meter
 
     // TX/RX state
+    void handleTQ(const QString &cmd); // Transmit query response
     void handleTX(const QString &cmd); // Transmit
     void handleRX(const QString &cmd); // Receive
 

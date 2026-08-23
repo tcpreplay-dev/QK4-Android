@@ -67,6 +67,7 @@ const QString Macros = "MACROS";
 const QString SwList = "SW_LIST";
 const QString Update = "UPDATE";
 const QString DxList = "DXLIST";
+const QString Sstv = "SSTV";
 } // namespace MacroIds
 
 /**
@@ -116,13 +117,14 @@ private:
 };
 
 /**
- * @brief Fn popup widget with 7 dual-action buttons.
+ * @brief Fn popup widget with 8 dual-action buttons.
  *
  * Layout:
  * Buttons 1-4: Fn.F1/F2, F3/F4, F5/F6, F7/F8 (macro buttons)
  * Button 5: SCRN CAP / MACROS
  * Button 6: SW LIST / UPDATE
  * Button 7: DXLIST
+ * Button 8: SSTV
  */
 class FnPopupWidget : public K4PopupBase {
     Q_OBJECT

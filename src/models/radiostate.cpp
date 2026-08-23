@@ -1003,6 +1003,7 @@ void RadioState::registerCommandHandlers() {
     m_commandHandlers.append({"SM", [this](const QString &c) { handleSM(c); }});
     m_commandHandlers.append({"PO", [this](const QString &c) { handlePO(c); }});
     m_commandHandlers.append({"TM", [this](const QString &c) { handleTM(c); }});
+    m_commandHandlers.append({"TQ", [this](const QString &c) { handleTQ(c); }});
     m_commandHandlers.append({"TX", [this](const QString &c) { handleTX(c); }});
     m_commandHandlers.append({"RX", [this](const QString &c) { handleRX(c); }});
     m_commandHandlers.append({"NB", [this](const QString &c) { handleNB(c); }});
@@ -1534,6 +1535,19 @@ void RadioState::handleTM(const QString &cmd) {
 // =============================================================================
 // Individual Command Handlers - TX/RX State
 // =============================================================================
+
+void RadioState::handleTQ(const QString &cmd) {
+    // TQ0/TQ1 is the documented confirmation of the K4's logical TX state.
+    // Treat it exactly like the unsolicited RX/TX state commands so clients
+    // can wait for confirmed key-up before releasing time-critical audio.
+    if (cmd.length() < 3 || (cmd.at(2) != QLatin1Char('0') && cmd.at(2) != QLatin1Char('1')))
+        return;
+    const bool transmitting = cmd.at(2) == QLatin1Char('1');
+    if (transmitting == m_isTransmitting)
+        return;
+    m_isTransmitting = transmitting;
+    emit transmitStateChanged(transmitting);
+}
 
 void RadioState::handleTX(const QString &cmd) {
     Q_UNUSED(cmd)

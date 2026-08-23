@@ -188,6 +188,7 @@ void TcpClient::attemptConnection() {
 }
 
 void TcpClient::disconnectFromHost() {
+    m_sstvAudioGate = false;
     stopPingTimer();
     m_connectTimer->stop();
     m_authTimer->stop();
@@ -230,6 +231,74 @@ void TcpClient::sendRaw(const QByteArray &data) {
     }
     if (m_socket->state() == QAbstractSocket::ConnectedState) {
         m_socket->write(data);
+    }
+}
+
+void TcpClient::beginSstvAudioTransmit(quint64 generation) {
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, "beginSstvAudioTransmit", Qt::QueuedConnection,
+                                  Q_ARG(quint64, generation));
+        return;
+    }
+    if (m_state.load(std::memory_order_acquire) != Connected
+        || m_socket->state() != QAbstractSocket::ConnectedState) {
+        emit sstvAudioTransmitFailed(QStringLiteral("The K4 connection is no longer available."), generation);
+        return;
+    }
+    // CAT and gate changes execute on the same I/O thread, keeping the
+    // lifecycle ordered relative to program-audio writes. MainWindow applies
+    // a fixed key-up guard before releasing SSTV audio; a state query is not
+    // required because some working K4 connections do not echo TQ1 here.
+    m_socket->write(Protocol::buildCATPacket(QStringLiteral("TX;")));
+    m_socket->flush();
+    m_sstvAudioGate = true;
+    m_sstvAudioGeneration = generation;
+    qInfo() << "SSTV TX CAT command queued" << "generation" << generation;
+    emit sstvAudioKeyRequested(generation);
+}
+
+void TcpClient::sendSstvAudio(const QByteArray &data, int emittedSamples, int totalSamples,
+                              int imageSamples, quint64 generation) {
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, "sendSstvAudio", Qt::QueuedConnection,
+                                  Q_ARG(QByteArray, data), Q_ARG(int, emittedSamples), Q_ARG(int, totalSamples),
+                                  Q_ARG(int, imageSamples),
+                                  Q_ARG(quint64, generation));
+        return;
+    }
+    if (m_sstvAudioGate && generation == m_sstvAudioGeneration
+        && m_socket->state() == QAbstractSocket::ConnectedState) {
+        // Bound queued program audio if the K4 link stalls. Brief TCP
+        // buffering is already covered by this limit; once exceeded, stop
+        // rather than dropping a tone packet and transmitting a corrupt image.
+        const qint64 backlogLimit = qMax<qint64>(8192, data.size() * 4LL);
+        if (m_socket->bytesToWrite() > backlogLimit) {
+            m_sstvAudioGate = false;
+            emit sstvAudioTransmitFailed(
+                QStringLiteral("The K4 audio link stalled. SSTV transmit was stopped."), generation);
+            return;
+        }
+        const qint64 written = m_socket->write(data);
+        if (written == data.size()) {
+            emit sstvAudioAccepted(emittedSamples, totalSamples, imageSamples, generation);
+        } else {
+            m_sstvAudioGate = false;
+            emit sstvAudioTransmitFailed(
+                QStringLiteral("The K4 audio link rejected an SSTV packet."), generation);
+        }
+    }
+}
+
+void TcpClient::stopSstvAudioAndUnkey() {
+    if (QThread::currentThread() != thread()) {
+        QMetaObject::invokeMethod(this, "stopSstvAudioAndUnkey", Qt::QueuedConnection);
+        return;
+    }
+    m_sstvAudioGate = false;
+    ++m_sstvAudioGeneration;
+    if (m_socket->state() == QAbstractSocket::ConnectedState) {
+        m_socket->write(Protocol::buildCATPacket(QStringLiteral("RX;")));
+        m_socket->flush();
     }
 }
 
@@ -287,6 +356,7 @@ void TcpClient::onSocketEncrypted() {
 
 void TcpClient::onSocketDisconnected() {
     qDebug() << "Socket disconnected";
+    m_sstvAudioGate = false;
     stopPingTimer();
     m_connectTimer->stop();
     m_authTimer->stop();
