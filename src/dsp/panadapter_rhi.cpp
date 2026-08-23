@@ -1087,11 +1087,11 @@ void PanadapterRhiWidget::render(QRhiCommandBuffer *cb) {
             qint64 secLowFreq, secHighFreq;
             int secShiftOffsetHz = m_secondaryIfShift * 10;
 
-            if (m_secondaryMode == "LSB") {
+            if (m_secondaryMode == "LSB" || m_secondaryMode == "DATA-R") {
                 qint64 center = m_secondaryTunedFreq - secShiftOffsetHz;
                 secLowFreq = center - m_secondaryFilterBw / 2;
                 secHighFreq = center + m_secondaryFilterBw / 2;
-            } else if (m_secondaryMode == "USB" || m_secondaryMode == "DATA" || m_secondaryMode == "DATA-R") {
+            } else if (m_secondaryMode == "USB" || m_secondaryMode == "DATA") {
                 qint64 center = m_secondaryTunedFreq + secShiftOffsetHz;
                 secLowFreq = center - m_secondaryFilterBw / 2;
                 secHighFreq = center + m_secondaryFilterBw / 2;
@@ -1206,13 +1206,13 @@ void PanadapterRhiWidget::render(QRhiCommandBuffer *cb) {
             // CW with shift=50 means passband centered at 500 Hz pitch
             int shiftOffsetHz = m_ifShift * 10;
 
-            if (m_mode == "LSB") {
-                // LSB: passband is below dial, shift indicates center offset (negative)
+            if (m_mode == "LSB" || m_mode == "DATA-R") {
+                // LSB/DATA-R: passband is below dial, shift indicates center offset (negative)
                 qint64 center = m_tunedFreq - shiftOffsetHz;
                 lowFreq = center - m_filterBw / 2;
                 highFreq = center + m_filterBw / 2;
-            } else if (m_mode == "USB" || m_mode == "DATA" || m_mode == "DATA-R") {
-                // USB: passband is above dial, shift indicates center offset
+            } else if (m_mode == "USB" || m_mode == "DATA") {
+                // USB/DATA: passband is above dial, shift indicates center offset
                 qint64 center = m_tunedFreq + shiftOffsetHz;
                 lowFreq = center - m_filterBw / 2;
                 highFreq = center + m_filterBw / 2;
@@ -1330,14 +1330,14 @@ void PanadapterRhiWidget::render(QRhiCommandBuffer *cb) {
             // Calculate notch offset from tunedFreq (consistent with mini-pan)
             if (m_notchEnabled && m_notchPitchHz > 0 && m_spanHz > 0) {
                 // NM value is audio frequency offset from dial frequency (tunedFreq).
-                // CW/CW-R use the same mapping as USB/LSB respectively:
+                // CW/CW-R and DATA/DATA-R use USB/LSB mapping respectively:
                 // CW:   notchRF = tunedFreq + NM  (USB-like sideband)
                 // CW-R: notchRF = tunedFreq - NM  (LSB-like sideband)
                 int offsetHz;
-                if (m_mode == "LSB" || m_mode == "CW-R") {
+                if (m_mode == "LSB" || m_mode == "CW-R" || m_mode == "DATA-R") {
                     offsetHz = -m_notchPitchHz;
                 } else {
-                    // USB, CW, DATA, DATA-R, AM, FM
+                    // USB, CW, DATA, AM, FM
                     offsetHz = m_notchPitchHz;
                 }
 

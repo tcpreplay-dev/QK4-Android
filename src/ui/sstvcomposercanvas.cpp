@@ -1,12 +1,17 @@
 #include "sstvcomposercanvas.h"
 
-#include <QMouseEvent>
 #include <QGestureEvent>
-#include <QPinchGesture>
-#include <QPainter>
 #include <QJsonArray>
 #include <QLineF>
+#include <QMouseEvent>
+#include <QPainter>
+#include <QPainterPathStroker>
+#include <QPinchGesture>
+#include <QPolygonF>
 #include <QStringList>
+#include <QTransform>
+
+#include <cmath>
 
 namespace {
 QRectF textBounds(const QFont &font, const QString &text) {
@@ -18,45 +23,74 @@ QRectF textBounds(const QFont &font, const QString &text) {
     return QRectF(0.0, 0.0, width, metrics.lineSpacing() * qMax(1, lines.size()));
 }
 
-void drawTextBlock(QPainter &painter, const QFont &font, const QPointF &center, const QString &text) {
+QPainterPath textPath(const QFont &font, const QPointF &center, const QString &text) {
     const QFontMetricsF metrics(font);
     const QRectF bounds = textBounds(font, text);
     const QPointF topLeft = center - QPointF(bounds.width() * 0.5, bounds.height() * 0.5);
     const QStringList lines = text.split(QLatin1Char('\n'));
-    for (int i = 0; i < lines.size(); ++i)
-        painter.drawText(QPointF(topLeft.x(), topLeft.y() + metrics.ascent() + i * metrics.lineSpacing()), lines.at(i));
+    QPainterPath path;
+    for (int i = 0; i < lines.size(); ++i) {
+        path.addText(QPointF(topLeft.x(),
+                             topLeft.y() + metrics.ascent() + i * metrics.lineSpacing()),
+                     font, lines.at(i));
+    }
+    // Font glyphs use contour direction to distinguish counters (holes) from
+    // overlapping components. Odd-even simplification can cancel component
+    // intersections and turn them into false holes. Winding fill unions those
+    // crossings while retaining correctly directed counters.
+    path.setFillRule(Qt::WindingFill);
+    return path;
 }
 
-void drawShape(QPainter &painter, SstvComposerCanvas::ShapeType type,
-               const QPointF &start, const QPointF &end) {
-    const QRectF bounds(start, end);
+QString objectTypeName(SstvComposerCanvas::ObjectType type) {
     switch (type) {
-    case SstvComposerCanvas::ShapeType::Line:
-        painter.drawLine(start, end);
-        break;
-    case SstvComposerCanvas::ShapeType::Arrow: {
-        const QLineF shaft(start, end);
-        painter.drawLine(shaft);
-        if (shaft.length() < 2.0)
-            break;
-        const qreal headLength = qMin<qreal>(18.0, qMax<qreal>(7.0, shaft.length() * 0.18));
-        QLineF left(end, end);
-        left.setLength(headLength);
-        left.setAngle(shaft.angle() + 150.0);
-        QLineF right(end, end);
-        right.setLength(headLength);
-        right.setAngle(shaft.angle() - 150.0);
-        painter.drawLine(left);
-        painter.drawLine(right);
-        break;
+    case SstvComposerCanvas::ObjectType::Text: return QStringLiteral("text");
+    case SstvComposerCanvas::ObjectType::Stroke: return QStringLiteral("stroke");
+    case SstvComposerCanvas::ObjectType::Line: return QStringLiteral("line");
+    case SstvComposerCanvas::ObjectType::Arrow: return QStringLiteral("arrow");
+    case SstvComposerCanvas::ObjectType::Rectangle: return QStringLiteral("rectangle");
+    case SstvComposerCanvas::ObjectType::Ellipse: return QStringLiteral("ellipse");
+    case SstvComposerCanvas::ObjectType::None: break;
     }
-    case SstvComposerCanvas::ShapeType::Rectangle:
-        painter.drawRect(bounds.normalized());
-        break;
-    case SstvComposerCanvas::ShapeType::Ellipse:
-        painter.drawEllipse(bounds.normalized());
-        break;
+    return QStringLiteral("none");
+}
+
+SstvComposerCanvas::ObjectType objectTypeFromName(const QString &name) {
+    if (name == QStringLiteral("text")) return SstvComposerCanvas::ObjectType::Text;
+    if (name == QStringLiteral("stroke")) return SstvComposerCanvas::ObjectType::Stroke;
+    if (name == QStringLiteral("line")) return SstvComposerCanvas::ObjectType::Line;
+    if (name == QStringLiteral("arrow")) return SstvComposerCanvas::ObjectType::Arrow;
+    if (name == QStringLiteral("rectangle")) return SstvComposerCanvas::ObjectType::Rectangle;
+    if (name == QStringLiteral("ellipse")) return SstvComposerCanvas::ObjectType::Ellipse;
+    return SstvComposerCanvas::ObjectType::None;
+}
+
+SstvComposerCanvas::ObjectType objectTypeFromShape(SstvComposerCanvas::ShapeType type) {
+    switch (type) {
+    case SstvComposerCanvas::ShapeType::Line: return SstvComposerCanvas::ObjectType::Line;
+    case SstvComposerCanvas::ShapeType::Arrow: return SstvComposerCanvas::ObjectType::Arrow;
+    case SstvComposerCanvas::ShapeType::Rectangle: return SstvComposerCanvas::ObjectType::Rectangle;
+    case SstvComposerCanvas::ShapeType::Ellipse: return SstvComposerCanvas::ObjectType::Ellipse;
     }
+    return SstvComposerCanvas::ObjectType::Line;
+}
+
+qreal distanceToSegment(const QPointF &point, const QPointF &start, const QPointF &end) {
+    const QPointF delta = end - start;
+    const qreal lengthSquared = QPointF::dotProduct(delta, delta);
+    if (lengthSquared <= 0.0001)
+        return QLineF(point, start).length();
+    const qreal projection = qBound(0.0,
+                                    QPointF::dotProduct(point - start, delta) / lengthSquared,
+                                    1.0);
+    return QLineF(point, start + delta * projection).length();
+}
+
+qreal normalizedRotation(qreal degrees) {
+    qreal result = std::fmod(degrees, 360.0);
+    if (result < 0.0)
+        result += 360.0;
+    return result;
 }
 }
 
@@ -74,15 +108,11 @@ bool SstvComposerCanvas::event(QEvent *event) {
         if (auto *pinch = static_cast<QPinchGesture *>(
                 gestureEvent->gesture(Qt::PinchGesture))) {
             if (pinch->state() == Qt::GestureStarted) {
-                m_draggingText = false;
+                m_draggingObject = false;
                 m_panningBackground = false;
                 m_dragUndoCaptured = false;
             } else if (pinch->state() == Qt::GestureUpdated
                        && pinch->changeFlags().testFlag(QPinchGesture::ScaleFactorChanged)) {
-                // QPinchGesture::scaleFactor() is already the relative change
-                // from the previous gesture event. Dividing it by
-                // lastScaleFactor() makes consecutive updates alternate and
-                // visibly fight the synchronized zoom slider.
                 const qreal factor = pinch->scaleFactor();
                 const QRectF target = imageRect();
                 if (!target.isEmpty() && qAbs(factor - 1.0) > 0.001) {
@@ -108,17 +138,15 @@ void SstvComposerCanvas::setBackground(const QImage &image) {
     if (!oldSize.isEmpty() && oldSize != m_background.size()) {
         const qreal xScale = static_cast<qreal>(m_background.width()) / oldSize.width();
         const qreal yScale = static_cast<qreal>(m_background.height()) / oldSize.height();
-        for (TextBlock &block : m_texts)
-            block.position = QPointF(block.position.x() * xScale, block.position.y() * yScale);
-        for (Stroke &stroke : m_strokes) {
-            stroke.width = qMax(1, qRound(stroke.width * (xScale + yScale) * 0.5));
-            for (QPointF &point : stroke.points)
+        const qreal widthScale = (xScale + yScale) * 0.5;
+        for (OverlayObject &object : m_objects) {
+            object.width = qMax(1, qRound(object.width * widthScale));
+            object.position = QPointF(object.position.x() * xScale,
+                                      object.position.y() * yScale);
+            object.start = QPointF(object.start.x() * xScale, object.start.y() * yScale);
+            object.end = QPointF(object.end.x() * xScale, object.end.y() * yScale);
+            for (QPointF &point : object.points)
                 point = QPointF(point.x() * xScale, point.y() * yScale);
-        }
-        for (Shape &shape : m_shapes) {
-            shape.width = qMax(1, qRound(shape.width * (xScale + yScale) * 0.5));
-            shape.start = QPointF(shape.start.x() * xScale, shape.start.y() * yScale);
-            shape.end = QPointF(shape.end.x() * xScale, shape.end.y() * yScale);
         }
     }
     update();
@@ -131,197 +159,392 @@ QImage SstvComposerCanvas::renderedImage() const {
 void SstvComposerCanvas::setTool(Tool tool) {
     m_tool = tool;
     setCursor(tool == Tool::Select ? Qt::ArrowCursor : Qt::CrossCursor);
+    update();
 }
 
 void SstvComposerCanvas::setInk(const QColor &color, int width) {
-    m_inkColor = color;
+    if (color.isValid())
+        m_outlineColor = color;
     m_inkWidth = qBound(1, width, 40);
 }
 
-void SstvComposerCanvas::addTextBlock(const QString &text, const QFont &font, const QColor &color,
+void SstvComposerCanvas::setFillColor(const QColor &color) {
+    m_fillColor = color.isValid() ? color : QColor(Qt::transparent);
+}
+
+void SstvComposerCanvas::setCallsignValues(const QString &myCall, const QString &toCall) {
+    const QString normalizedMyCall = myCall.trimmed().toUpper();
+    const QString normalizedToCall = toCall.trimmed().toUpper();
+    if (m_myCall == normalizedMyCall && m_toCall == normalizedToCall)
+        return;
+    m_myCall = normalizedMyCall;
+    m_toCall = normalizedToCall;
+    update();
+}
+
+void SstvComposerCanvas::addTextBlock(const QString &text, const QFont &font,
+                                      const QColor &color,
                                       const QPointF &normalizedPosition) {
     if (m_background.isNull() || text.trimmed().isEmpty())
         return;
     saveUndo();
-    m_texts.append({text, font, color,
-                    QPointF(qBound(0.0, normalizedPosition.x(), 1.0) * m_background.width(),
-                            qBound(0.0, normalizedPosition.y(), 1.0) * m_background.height())});
-    m_selectedText = m_texts.size() - 1;
+    OverlayObject object;
+    object.type = ObjectType::Text;
+    object.text = text;
+    object.font = font;
+    object.outlineColor = m_outlineColor;
+    object.fillColor = color.isValid() ? color : m_fillColor;
+    object.position = QPointF(qBound(0.0, normalizedPosition.x(), 1.0) * m_background.width(),
+                              qBound(0.0, normalizedPosition.y(), 1.0) * m_background.height());
+    m_objects.append(object);
+    m_selectedObject = m_objects.size() - 1;
     emitChanged();
 }
 
-void SstvComposerCanvas::updateSelectedText(const QString &text, const QFont &font, const QColor &color) {
-    if (m_selectedText < 0 || m_selectedText >= m_texts.size() || text.trimmed().isEmpty())
+void SstvComposerCanvas::updateSelectedText(const QString &text, const QFont &font,
+                                            const QColor &color) {
+    if (!hasSelectedText() || text.trimmed().isEmpty())
         return;
     saveUndo();
-    TextBlock &block = m_texts[m_selectedText];
-    block.text = text;
-    block.font = font;
-    block.color = color;
+    OverlayObject &object = m_objects[m_selectedObject];
+    object.text = text;
+    object.font = font;
+    object.fillColor = color.isValid() ? color : object.fillColor;
     emitChanged();
 }
 
 void SstvComposerCanvas::updateSelectedTextColor(const QColor &color) {
-    if (!hasSelectedText() || !color.isValid() || m_texts.at(m_selectedText).color == color)
-        return;
-    saveUndo();
-    m_texts[m_selectedText].color = color;
-    emitChanged();
+    updateSelectedFillColor(color);
 }
 
 void SstvComposerCanvas::updateSelectedTextFont(const QFont &font) {
-    if (!hasSelectedText() || m_texts.at(m_selectedText).font == font)
+    if (!hasSelectedText() || m_objects.at(m_selectedObject).font == font)
         return;
     saveUndo();
-    m_texts[m_selectedText].font = font;
+    m_objects[m_selectedObject].font = font;
     emitChanged();
+}
+
+void SstvComposerCanvas::updateSelectedOutlineColor(const QColor &color) {
+    if (!hasSelectedObject() || !color.isValid()
+        || m_objects.at(m_selectedObject).outlineColor == color) {
+        return;
+    }
+    saveUndo();
+    m_objects[m_selectedObject].outlineColor = color;
+    m_outlineColor = color;
+    emitChanged();
+}
+
+void SstvComposerCanvas::updateSelectedFillColor(const QColor &color) {
+    if (!hasSelectedObject())
+        return;
+    const QColor selected = color.isValid() ? color : QColor(Qt::transparent);
+    if (m_objects.at(m_selectedObject).fillColor == selected)
+        return;
+    saveUndo();
+    m_objects[m_selectedObject].fillColor = selected;
+    m_fillColor = selected;
+    emitChanged();
+}
+
+void SstvComposerCanvas::updateSelectedSize(int controlValue) {
+    if (!hasSelectedObject())
+        return;
+    const int boundedValue = qBound(8, controlValue, 160);
+    if (m_objects.at(m_selectedObject).type == ObjectType::Text) {
+        if (m_objects.at(m_selectedObject).font.pixelSize() == boundedValue)
+            return;
+        saveUndo();
+        m_objects[m_selectedObject].font.setPixelSize(boundedValue);
+    } else {
+        const int width = qBound(1, qRound(boundedValue / 5.0), 40);
+        if (m_objects.at(m_selectedObject).width == width)
+            return;
+        saveUndo();
+        m_objects[m_selectedObject].width = width;
+    }
+    emitChanged();
+}
+
+bool SstvComposerCanvas::hasSelectedObject() const {
+    return m_selectedObject >= 0 && m_selectedObject < m_objects.size();
+}
+
+SstvComposerCanvas::ObjectType SstvComposerCanvas::selectedObjectType() const {
+    return hasSelectedObject() ? m_objects.at(m_selectedObject).type : ObjectType::None;
+}
+
+bool SstvComposerCanvas::selectedObjectSupportsFill() const {
+    return hasSelectedObject();
 }
 
 bool SstvComposerCanvas::hasSelectedText() const {
-    return m_selectedText >= 0 && m_selectedText < m_texts.size();
+    return selectedObjectType() == ObjectType::Text;
 }
 
 QString SstvComposerCanvas::selectedText() const {
-    return hasSelectedText() ? m_texts.at(m_selectedText).text : QString();
+    return hasSelectedText() ? m_objects.at(m_selectedObject).text : QString();
 }
 
 QFont SstvComposerCanvas::selectedTextFont() const {
-    return hasSelectedText() ? m_texts.at(m_selectedText).font : QFont();
+    return hasSelectedText() ? m_objects.at(m_selectedObject).font : QFont();
 }
 
 QColor SstvComposerCanvas::selectedTextColor() const {
-    return hasSelectedText() ? m_texts.at(m_selectedText).color : QColor();
+    return hasSelectedText() ? m_objects.at(m_selectedObject).fillColor : QColor();
 }
 
-void SstvComposerCanvas::deleteSelectedText() {
-    if (!hasSelectedText())
+QColor SstvComposerCanvas::selectedOutlineColor() const {
+    return hasSelectedObject() ? m_objects.at(m_selectedObject).outlineColor : QColor();
+}
+
+QColor SstvComposerCanvas::selectedFillColor() const {
+    return hasSelectedObject() ? m_objects.at(m_selectedObject).fillColor : QColor();
+}
+
+int SstvComposerCanvas::selectedSize() const {
+    if (!hasSelectedObject())
+        return -1;
+    const OverlayObject &object = m_objects.at(m_selectedObject);
+    return object.type == ObjectType::Text ? object.font.pixelSize() : object.width * 5;
+}
+
+void SstvComposerCanvas::deleteSelectedObject() {
+    if (!hasSelectedObject())
         return;
     saveUndo();
-    m_texts.removeAt(m_selectedText);
-    m_selectedText = -1;
+    m_objects.removeAt(m_selectedObject);
+    clearSelection();
     emitChanged();
 }
 
+void SstvComposerCanvas::deleteSelectedText() {
+    if (hasSelectedText())
+        deleteSelectedObject();
+}
+
+void SstvComposerCanvas::rotateSelectedObject(int degrees) {
+    if (!hasSelectedObject() || degrees == 0)
+        return;
+    saveUndo();
+    m_objects[m_selectedObject].rotation =
+        normalizedRotation(m_objects.at(m_selectedObject).rotation + degrees);
+    emitChanged();
+}
+
+bool SstvComposerCanvas::hasUnresolvedVariables(QString *variable) const {
+    for (const OverlayObject &object : m_objects) {
+        if (object.type != ObjectType::Text)
+            continue;
+        if (m_myCall.isEmpty()
+            && object.text.contains(myCallToken(), Qt::CaseInsensitive)) {
+            if (variable)
+                *variable = myCallToken();
+            return true;
+        }
+        if (m_toCall.isEmpty()
+            && object.text.contains(toCallToken(), Qt::CaseInsensitive)) {
+            if (variable)
+                *variable = toCallToken();
+            return true;
+        }
+    }
+    return false;
+}
+
 QJsonObject SstvComposerCanvas::compositionState() const {
-    QJsonArray texts;
-    for (const TextBlock &block : m_texts) {
-        const qreal width = qMax(1, m_background.width());
-        const qreal height = qMax(1, m_background.height());
-        texts.append(QJsonObject{{QStringLiteral("text"), block.text},
-                                 {QStringLiteral("font"), block.font.family()},
-                                 {QStringLiteral("pixelSize"), block.font.pixelSize()},
-                                 {QStringLiteral("weight"), block.font.weight()},
-                                 {QStringLiteral("stretch"), block.font.stretch()},
-                                 {QStringLiteral("bold"), block.font.bold()},
-                                 {QStringLiteral("italic"), block.font.italic()},
-                                 {QStringLiteral("color"), block.color.name(QColor::HexArgb)},
-                                 {QStringLiteral("x"), block.position.x() / width},
-                                 {QStringLiteral("y"), block.position.y() / height}});
-    }
-    QJsonArray strokes;
-    for (const Stroke &stroke : m_strokes) {
-        QJsonArray points;
-        const qreal width = qMax(1, m_background.width());
-        const qreal height = qMax(1, m_background.height());
-        for (const QPointF &point : stroke.points)
-            points.append(QJsonArray{point.x() / width, point.y() / height});
-        strokes.append(QJsonObject{{QStringLiteral("color"), stroke.color.name(QColor::HexArgb)},
-                                   {QStringLiteral("width"), stroke.width / width},
-                                   {QStringLiteral("points"), points}});
-    }
-    QJsonArray shapes;
+    QJsonArray objects;
     const qreal imageWidth = qMax(1, m_background.width());
     const qreal imageHeight = qMax(1, m_background.height());
-    for (const Shape &shape : m_shapes) {
-        shapes.append(QJsonObject{{QStringLiteral("type"), static_cast<int>(shape.type)},
-                                  {QStringLiteral("color"), shape.color.name(QColor::HexArgb)},
-                                  {QStringLiteral("width"), shape.width / imageWidth},
-                                  {QStringLiteral("x1"), shape.start.x() / imageWidth},
-                                  {QStringLiteral("y1"), shape.start.y() / imageHeight},
-                                  {QStringLiteral("x2"), shape.end.x() / imageWidth},
-                                  {QStringLiteral("y2"), shape.end.y() / imageHeight}});
+    for (const OverlayObject &object : m_objects) {
+        QJsonObject encoded{{QStringLiteral("type"), objectTypeName(object.type)},
+                            {QStringLiteral("outlineColor"),
+                             object.outlineColor.name(QColor::HexArgb)},
+                            {QStringLiteral("fillColor"),
+                             object.fillColor.name(QColor::HexArgb)},
+                            {QStringLiteral("width"), object.width / imageWidth},
+                            {QStringLiteral("rotation"), object.rotation}};
+        if (object.type == ObjectType::Text) {
+            encoded.insert(QStringLiteral("text"), object.text);
+            encoded.insert(QStringLiteral("font"), object.font.family());
+            encoded.insert(QStringLiteral("pixelSize"), object.font.pixelSize());
+            encoded.insert(QStringLiteral("weight"), object.font.weight());
+            encoded.insert(QStringLiteral("stretch"), object.font.stretch());
+            encoded.insert(QStringLiteral("bold"), object.font.bold());
+            encoded.insert(QStringLiteral("italic"), object.font.italic());
+            encoded.insert(QStringLiteral("x"), object.position.x() / imageWidth);
+            encoded.insert(QStringLiteral("y"), object.position.y() / imageHeight);
+        } else if (object.type == ObjectType::Stroke) {
+            QJsonArray points;
+            for (const QPointF &point : object.points)
+                points.append(QJsonArray{point.x() / imageWidth, point.y() / imageHeight});
+            encoded.insert(QStringLiteral("points"), points);
+        } else {
+            encoded.insert(QStringLiteral("x1"), object.start.x() / imageWidth);
+            encoded.insert(QStringLiteral("y1"), object.start.y() / imageHeight);
+            encoded.insert(QStringLiteral("x2"), object.end.x() / imageWidth);
+            encoded.insert(QStringLiteral("y2"), object.end.y() / imageHeight);
+        }
+        objects.append(encoded);
     }
-    return {{QStringLiteral("version"), 1},
-            {QStringLiteral("texts"), texts},
-            {QStringLiteral("strokes"), strokes},
-            {QStringLiteral("shapes"), shapes}};
+    return {{QStringLiteral("version"), 3}, {QStringLiteral("objects"), objects}};
 }
 
 bool SstvComposerCanvas::restoreCompositionState(const QJsonObject &state) {
     if (m_background.isNull())
         return false;
-    QVector<TextBlock> texts;
-    QVector<Stroke> strokes;
-    QVector<Shape> shapes;
-    for (const QJsonValue &value : state.value(QStringLiteral("texts")).toArray()) {
-        const QJsonObject object = value.toObject();
-        const QString text = object.value(QStringLiteral("text")).toString();
-        if (text.trimmed().isEmpty())
-            continue;
-        QFont font(object.value(QStringLiteral("font")).toString(QStringLiteral("Sans Serif")));
-        font.setPixelSize(qBound(8, object.value(QStringLiteral("pixelSize")).toInt(28), 160));
-        if (object.contains(QStringLiteral("weight"))) {
+    QVector<OverlayObject> objects;
+    const int stateVersion = state.value(QStringLiteral("version")).toInt(1);
+    const qreal imageWidth = qMax(1, m_background.width());
+    const qreal imageHeight = qMax(1, m_background.height());
+
+    const auto decodeFont = [](const QJsonObject &encoded) {
+        QFont font(encoded.value(QStringLiteral("font"))
+                       .toString(QStringLiteral("Sans Serif")));
+        font.setPixelSize(qBound(8, encoded.value(QStringLiteral("pixelSize")).toInt(28), 160));
+        if (encoded.contains(QStringLiteral("weight"))) {
             font.setWeight(static_cast<QFont::Weight>(
                 qBound(static_cast<int>(QFont::Thin),
-                       object.value(QStringLiteral("weight")).toInt(static_cast<int>(QFont::Normal)),
+                       encoded.value(QStringLiteral("weight"))
+                           .toInt(static_cast<int>(QFont::Normal)),
                        static_cast<int>(QFont::Black))));
         } else {
-            font.setBold(object.value(QStringLiteral("bold")).toBool(true));
+            font.setBold(encoded.value(QStringLiteral("bold")).toBool(true));
         }
-        // QFont reports 0 when no explicit stretch was selected. That means
-        // normal width, not a literal 0/1-percent font. Older saved image
-        // templates therefore need 0 normalized to Unstretched when loaded.
-        const int storedStretch = object.value(QStringLiteral("stretch"))
+        const int storedStretch = encoded.value(QStringLiteral("stretch"))
                                       .toInt(QFont::Unstretched);
         font.setStretch(storedStretch > 0 ? qBound(1, storedStretch, 400)
                                           : static_cast<int>(QFont::Unstretched));
-        font.setItalic(object.value(QStringLiteral("italic")).toBool(false));
-        const QColor color(object.value(QStringLiteral("color")).toString(QStringLiteral("#ffffffff")));
-        texts.append({text, font, color.isValid() ? color : QColor(Qt::white),
-                      QPointF(qBound(0.0, object.value(QStringLiteral("x")).toDouble(0.5), 1.0) * m_background.width(),
-                              qBound(0.0, object.value(QStringLiteral("y")).toDouble(0.5), 1.0) * m_background.height())});
-    }
-    for (const QJsonValue &value : state.value(QStringLiteral("strokes")).toArray()) {
-        const QJsonObject object = value.toObject();
-        Stroke stroke;
-        stroke.color = QColor(object.value(QStringLiteral("color")).toString(QStringLiteral("#ffffffff")));
-        if (!stroke.color.isValid())
-            stroke.color = Qt::white;
-        stroke.width = qBound(1, qRound(object.value(QStringLiteral("width")).toDouble(0.0125)
-                                       * m_background.width()), 80);
-        for (const QJsonValue &pointValue : object.value(QStringLiteral("points")).toArray()) {
-            const QJsonArray point = pointValue.toArray();
-            if (point.size() == 2)
-                stroke.points.append(QPointF(qBound(0.0, point.at(0).toDouble(), 1.0) * m_background.width(),
-                                             qBound(0.0, point.at(1).toDouble(), 1.0) * m_background.height()));
+        font.setItalic(encoded.value(QStringLiteral("italic")).toBool(false));
+        return font;
+    };
+    const auto decodeColor = [](const QJsonValue &value, const QColor &fallback) {
+        const QColor color(value.toString(fallback.name(QColor::HexArgb)));
+        return color.isValid() ? color : fallback;
+    };
+    const auto normalizedPoint = [imageWidth, imageHeight](const QJsonObject &encoded,
+                                                           const QString &x,
+                                                           const QString &y,
+                                                           qreal fallback = 0.5) {
+        return QPointF(qBound(0.0, encoded.value(x).toDouble(fallback), 1.0) * imageWidth,
+                       qBound(0.0, encoded.value(y).toDouble(fallback), 1.0) * imageHeight);
+    };
+
+    if (state.value(QStringLiteral("objects")).isArray()) {
+        for (const QJsonValue &value : state.value(QStringLiteral("objects")).toArray()) {
+            const QJsonObject encoded = value.toObject();
+            OverlayObject object;
+            object.type = objectTypeFromName(encoded.value(QStringLiteral("type")).toString());
+            if (object.type == ObjectType::None)
+                continue;
+            object.outlineColor = decodeColor(encoded.value(QStringLiteral("outlineColor")),
+                                              QColor(Qt::white));
+            object.fillColor = decodeColor(encoded.value(QStringLiteral("fillColor")),
+                                           QColor(Qt::transparent));
+            // Version 2 used outlineColor as the sole visible color for text
+            // and strokes. Version 3 gives those objects a true core/fill plus
+            // a separate thin outline, so migrate without changing appearance.
+            if (stateVersion < 3
+                && object.type != ObjectType::Rectangle
+                && object.type != ObjectType::Ellipse) {
+                object.fillColor = object.outlineColor;
+                object.outlineColor = Qt::transparent;
+            }
+            object.width = qBound(1, qRound(encoded.value(QStringLiteral("width"))
+                                                .toDouble(0.0125) * imageWidth), 80);
+            object.rotation = normalizedRotation(
+                encoded.value(QStringLiteral("rotation")).toDouble());
+            if (object.type == ObjectType::Text) {
+                object.text = encoded.value(QStringLiteral("text")).toString();
+                if (object.text.trimmed().isEmpty())
+                    continue;
+                object.font = decodeFont(encoded);
+                object.position = normalizedPoint(encoded, QStringLiteral("x"),
+                                                   QStringLiteral("y"));
+            } else if (object.type == ObjectType::Stroke) {
+                for (const QJsonValue &pointValue : encoded.value(QStringLiteral("points")).toArray()) {
+                    const QJsonArray point = pointValue.toArray();
+                    if (point.size() == 2) {
+                        object.points.append(QPointF(
+                            qBound(0.0, point.at(0).toDouble(), 1.0) * imageWidth,
+                            qBound(0.0, point.at(1).toDouble(), 1.0) * imageHeight));
+                    }
+                }
+                if (object.points.isEmpty())
+                    continue;
+            } else {
+                object.start = normalizedPoint(encoded, QStringLiteral("x1"),
+                                                QStringLiteral("y1"), 0.0);
+                object.end = normalizedPoint(encoded, QStringLiteral("x2"),
+                                              QStringLiteral("y2"), 0.0);
+            }
+            objects.append(object);
         }
-        if (!stroke.points.isEmpty())
-            strokes.append(stroke);
+    } else {
+        // Version-1 compositions stored type-specific arrays. Import them into
+        // the ordered version-2 object model without changing their appearance.
+        for (const QJsonValue &value : state.value(QStringLiteral("strokes")).toArray()) {
+            const QJsonObject encoded = value.toObject();
+            OverlayObject object;
+            object.type = ObjectType::Stroke;
+            object.fillColor = decodeColor(encoded.value(QStringLiteral("color")),
+                                           QColor(Qt::white));
+            object.outlineColor = Qt::transparent;
+            object.width = qBound(1, qRound(encoded.value(QStringLiteral("width"))
+                                                .toDouble(0.0125) * imageWidth), 80);
+            for (const QJsonValue &pointValue : encoded.value(QStringLiteral("points")).toArray()) {
+                const QJsonArray point = pointValue.toArray();
+                if (point.size() == 2) {
+                    object.points.append(QPointF(
+                        qBound(0.0, point.at(0).toDouble(), 1.0) * imageWidth,
+                        qBound(0.0, point.at(1).toDouble(), 1.0) * imageHeight));
+                }
+            }
+            if (!object.points.isEmpty())
+                objects.append(object);
+        }
+        for (const QJsonValue &value : state.value(QStringLiteral("shapes")).toArray()) {
+            const QJsonObject encoded = value.toObject();
+            OverlayObject object;
+            const ShapeType shapeType = static_cast<ShapeType>(
+                qBound(0, encoded.value(QStringLiteral("type")).toInt(), 3));
+            object.type = objectTypeFromShape(shapeType);
+            object.outlineColor = decodeColor(encoded.value(QStringLiteral("color")),
+                                              QColor(Qt::white));
+            object.fillColor = Qt::transparent;
+            if (object.type == ObjectType::Line || object.type == ObjectType::Arrow) {
+                object.fillColor = object.outlineColor;
+                object.outlineColor = Qt::transparent;
+            }
+            object.width = qBound(1, qRound(encoded.value(QStringLiteral("width"))
+                                                .toDouble(0.0125) * imageWidth), 80);
+            object.start = normalizedPoint(encoded, QStringLiteral("x1"),
+                                           QStringLiteral("y1"), 0.0);
+            object.end = normalizedPoint(encoded, QStringLiteral("x2"),
+                                         QStringLiteral("y2"), 0.0);
+            objects.append(object);
+        }
+        for (const QJsonValue &value : state.value(QStringLiteral("texts")).toArray()) {
+            const QJsonObject encoded = value.toObject();
+            OverlayObject object;
+            object.type = ObjectType::Text;
+            object.text = encoded.value(QStringLiteral("text")).toString();
+            if (object.text.trimmed().isEmpty())
+                continue;
+            object.font = decodeFont(encoded);
+            object.fillColor = decodeColor(encoded.value(QStringLiteral("color")),
+                                           QColor(Qt::white));
+            object.outlineColor = Qt::transparent;
+            object.position = normalizedPoint(encoded, QStringLiteral("x"),
+                                               QStringLiteral("y"));
+            objects.append(object);
+        }
     }
-    for (const QJsonValue &value : state.value(QStringLiteral("shapes")).toArray()) {
-        const QJsonObject object = value.toObject();
-        Shape shape;
-        shape.type = static_cast<ShapeType>(qBound(0, object.value(QStringLiteral("type")).toInt(), 3));
-        shape.color = QColor(object.value(QStringLiteral("color")).toString(QStringLiteral("#ffffffff")));
-        if (!shape.color.isValid())
-            shape.color = Qt::white;
-        shape.width = qBound(1, qRound(object.value(QStringLiteral("width")).toDouble(0.0125)
-                                      * m_background.width()), 80);
-        shape.start = QPointF(qBound(0.0, object.value(QStringLiteral("x1")).toDouble(), 1.0)
-                                  * m_background.width(),
-                              qBound(0.0, object.value(QStringLiteral("y1")).toDouble(), 1.0)
-                                  * m_background.height());
-        shape.end = QPointF(qBound(0.0, object.value(QStringLiteral("x2")).toDouble(), 1.0)
-                                * m_background.width(),
-                            qBound(0.0, object.value(QStringLiteral("y2")).toDouble(), 1.0)
-                                * m_background.height());
-        shapes.append(shape);
-    }
+
     saveUndo();
-    m_texts = texts;
-    m_strokes = strokes;
-    m_shapes = shapes;
-    m_selectedText = -1;
+    m_objects = objects;
+    clearSelection();
     emitChanged();
     return true;
 }
@@ -329,36 +552,32 @@ bool SstvComposerCanvas::restoreCompositionState(const QJsonObject &state) {
 void SstvComposerCanvas::undo() {
     if (m_undo.isEmpty())
         return;
-    m_redo.append({m_texts, m_strokes, m_shapes});
+    m_redo.append({m_objects});
     restore(m_undo.takeLast());
 }
 
 void SstvComposerCanvas::redo() {
     if (m_redo.isEmpty())
         return;
-    m_undo.append({m_texts, m_strokes, m_shapes});
+    m_undo.append({m_objects});
     restore(m_redo.takeLast());
 }
 
 void SstvComposerCanvas::resetComposition() {
-    if (m_texts.isEmpty() && m_strokes.isEmpty() && m_shapes.isEmpty())
+    if (m_objects.isEmpty())
         return;
     saveUndo();
-    m_texts.clear();
-    m_strokes.clear();
-    m_shapes.clear();
-    m_selectedText = -1;
+    m_objects.clear();
+    clearSelection();
     emitChanged();
 }
 
 void SstvComposerCanvas::clearCompositionForNewImage() {
-    m_texts.clear();
-    m_strokes.clear();
-    m_shapes.clear();
+    m_objects.clear();
     m_undo.clear();
     m_redo.clear();
-    m_selectedText = -1;
-    m_draggingText = false;
+    clearSelection();
+    m_draggingObject = false;
     m_panningBackground = false;
     m_dragUndoCaptured = false;
     emitChanged();
@@ -369,17 +588,234 @@ QRectF SstvComposerCanvas::imageRect() const {
         return QRectF();
     QSizeF size = m_background.size();
     size.scale(this->size(), Qt::KeepAspectRatio);
-    return QRectF((width() - size.width()) * 0.5, (height() - size.height()) * 0.5, size.width(), size.height());
+    return QRectF((width() - size.width()) * 0.5, (height() - size.height()) * 0.5,
+                  size.width(), size.height());
 }
 
 QPointF SstvComposerCanvas::imagePoint(const QPointF &widgetPoint) const {
-    const QRectF rect = imageRect();
-    if (rect.isEmpty() || m_background.isNull())
+    const QRectF target = imageRect();
+    if (target.isEmpty() || m_background.isNull())
         return QPointF();
-    return QPointF(qBound(0.0, (widgetPoint.x() - rect.left()) * m_background.width() / rect.width(),
-                         static_cast<double>(m_background.width() - 1)),
-                   qBound(0.0, (widgetPoint.y() - rect.top()) * m_background.height() / rect.height(),
-                         static_cast<double>(m_background.height() - 1)));
+    return QPointF(qBound(0.0, (widgetPoint.x() - target.left())
+                                  * m_background.width() / target.width(),
+                          static_cast<double>(m_background.width() - 1)),
+                   qBound(0.0, (widgetPoint.y() - target.top())
+                                  * m_background.height() / target.height(),
+                          static_cast<double>(m_background.height() - 1)));
+}
+
+QString SstvComposerCanvas::resolvedText(const QString &text, bool showPlaceholders) const {
+    QString result = text;
+    result.replace(myCallToken(), m_myCall.isEmpty() && showPlaceholders
+                                      ? QStringLiteral("[MY CALL]") : m_myCall,
+                   Qt::CaseInsensitive);
+    result.replace(toCallToken(), m_toCall.isEmpty() && showPlaceholders
+                                      ? QStringLiteral("[TO CALL]") : m_toCall,
+                   Qt::CaseInsensitive);
+    return result;
+}
+
+QRectF SstvComposerCanvas::objectBounds(const OverlayObject &object) const {
+    if (object.type == ObjectType::Text) {
+        const QRectF bounds = textBounds(object.font, resolvedText(object.text));
+        return QRectF(object.position.x() - bounds.width() * 0.5,
+                      object.position.y() - bounds.height() * 0.5,
+                      bounds.width(), bounds.height());
+    }
+    if (object.type == ObjectType::Stroke) {
+        const QRectF bounds = QPolygonF(object.points).boundingRect();
+        return bounds.adjusted(-object.width * 0.5, -object.width * 0.5,
+                               object.width * 0.5, object.width * 0.5);
+    }
+    QRectF bounds(object.start, object.end);
+    bounds = bounds.normalized();
+    if (object.type == ObjectType::Line || object.type == ObjectType::Arrow)
+        bounds = bounds.adjusted(-object.width * 0.5, -object.width * 0.5,
+                                 object.width * 0.5, object.width * 0.5);
+    return bounds;
+}
+
+QPointF SstvComposerCanvas::objectCenter(const OverlayObject &object) const {
+    if (object.type == ObjectType::Text)
+        return object.position;
+    return objectBounds(object).center();
+}
+
+QTransform SstvComposerCanvas::objectTransform(const OverlayObject &object) const {
+    const QPointF center = objectCenter(object);
+    QTransform transform;
+    transform.translate(center.x(), center.y());
+    transform.rotate(object.rotation);
+    transform.translate(-center.x(), -center.y());
+    return transform;
+}
+
+QPainterPath SstvComposerCanvas::objectPath(const OverlayObject &object) const {
+    QPainterPath path;
+    if (object.type == ObjectType::Text) {
+        path.addRect(objectBounds(object));
+    } else if (object.type == ObjectType::Stroke) {
+        if (!object.points.isEmpty()) {
+            path.moveTo(object.points.first());
+            for (int index = 1; index < object.points.size(); ++index)
+                path.lineTo(object.points.at(index));
+        }
+    } else if (object.type == ObjectType::Rectangle) {
+        path.addRect(QRectF(object.start, object.end).normalized());
+    } else if (object.type == ObjectType::Ellipse) {
+        path.addEllipse(QRectF(object.start, object.end).normalized());
+    } else {
+        path.moveTo(object.start);
+        path.lineTo(object.end);
+    }
+    return path;
+}
+
+QVector<int> SstvComposerCanvas::objectsAt(const QPointF &point) const {
+    QVector<int> result;
+    for (int index = m_objects.size() - 1; index >= 0; --index) {
+        if (objectContains(m_objects.at(index), point))
+            result.append(index);
+    }
+    return result;
+}
+
+bool SstvComposerCanvas::objectContains(const OverlayObject &object,
+                                        const QPointF &point) const {
+    bool invertible = false;
+    const QPointF localPoint = objectTransform(object).inverted(&invertible).map(point);
+    if (!invertible)
+        return false;
+    const QRectF target = imageRect();
+    const qreal imagePerWidgetPixel = target.isEmpty()
+        ? 1.0 : m_background.width() / qMax<qreal>(1.0, target.width());
+    const qreal tolerance = qMax<qreal>(4.0, 12.0 * imagePerWidgetPixel);
+    if (object.type == ObjectType::Text)
+        return objectBounds(object).adjusted(-tolerance, -tolerance,
+                                             tolerance, tolerance).contains(localPoint);
+    if (object.type == ObjectType::Stroke) {
+        for (int index = 1; index < object.points.size(); ++index) {
+            if (distanceToSegment(localPoint, object.points.at(index - 1),
+                                  object.points.at(index))
+                <= tolerance + object.width * 0.5) {
+                return true;
+            }
+        }
+        return object.points.size() == 1
+            && QLineF(localPoint, object.points.first()).length() <= tolerance;
+    }
+    if (object.type == ObjectType::Line || object.type == ObjectType::Arrow) {
+        return distanceToSegment(localPoint, object.start, object.end)
+            <= tolerance + object.width * 0.5;
+    }
+    const QPainterPath path = objectPath(object);
+    if (object.fillColor.alpha() > 0 && path.contains(localPoint))
+        return true;
+    QPainterPathStroker stroker;
+    stroker.setWidth(qMax<qreal>(object.width + tolerance * 2.0, tolerance * 2.0));
+    return stroker.createStroke(path).contains(localPoint);
+}
+
+void SstvComposerCanvas::drawObject(QPainter &painter,
+                                    const OverlayObject &object) const {
+    painter.save();
+    painter.setWorldTransform(objectTransform(object), true);
+    if (object.type == ObjectType::Text) {
+        const QPainterPath glyphs = textPath(object.font, object.position,
+                                             resolvedText(object.text));
+        if (object.outlineColor.alpha() > 0) {
+            // A normal QPen is centered on every raw glyph subpath. That puts
+            // outline ink inside the character and along self-intersections
+            // such as a Q tail crossing its bowl. Build a dilated silhouette,
+            // remove the filled glyph, and paint only the exterior contour.
+            QPainterPathStroker stroker;
+            stroker.setWidth(3.0);
+            stroker.setCapStyle(Qt::RoundCap);
+            stroker.setJoinStyle(Qt::RoundJoin);
+            QPainterPath exterior = stroker.createStroke(glyphs).subtracted(glyphs);
+            exterior.setFillRule(Qt::WindingFill);
+            painter.setPen(Qt::NoPen);
+            painter.setBrush(QBrush(object.outlineColor));
+            painter.drawPath(exterior);
+        }
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QBrush(object.fillColor));
+        painter.drawPath(glyphs);
+    } else if (object.type == ObjectType::Stroke) {
+        if (object.points.size() >= 2) {
+            if (object.outlineColor.alpha() > 0) {
+                painter.setPen(QPen(object.outlineColor, object.width + 3.0,
+                                    Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                painter.drawPolyline(object.points.constData(), object.points.size());
+            }
+            if (object.fillColor.alpha() > 0) {
+                painter.setPen(QPen(object.fillColor, object.width, Qt::SolidLine,
+                                    Qt::RoundCap, Qt::RoundJoin));
+                painter.drawPolyline(object.points.constData(), object.points.size());
+            }
+        }
+    } else {
+        if (object.type == ObjectType::Rectangle || object.type == ObjectType::Ellipse)
+            painter.setBrush(QBrush(object.fillColor));
+        else
+            painter.setBrush(Qt::NoBrush);
+
+        const auto drawLineOrArrow = [&painter, &object]() {
+            const QLineF shaft(object.start, object.end);
+            painter.drawLine(shaft);
+            if (object.type != ObjectType::Arrow || shaft.length() < 2.0)
+                return;
+            const qreal headLength = qMin<qreal>(18.0,
+                qMax<qreal>(7.0, shaft.length() * 0.18));
+            // QLineF::setLength() cannot extend a null line reliably. Build
+            // each head segment at a real length and place its origin exactly
+            // at the finger-release endpoint.
+            QLineF left = QLineF::fromPolar(headLength, shaft.angle() + 150.0);
+            left.translate(object.end);
+            QLineF right = QLineF::fromPolar(headLength, shaft.angle() - 150.0);
+            right.translate(object.end);
+            painter.drawLine(left);
+            painter.drawLine(right);
+        };
+
+        if (object.type == ObjectType::Line || object.type == ObjectType::Arrow) {
+            if (object.outlineColor.alpha() > 0) {
+                painter.setPen(QPen(object.outlineColor, object.width + 3.0,
+                                    Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                drawLineOrArrow();
+            }
+            if (object.fillColor.alpha() > 0) {
+                painter.setPen(QPen(object.fillColor, object.width, Qt::SolidLine,
+                                    Qt::RoundCap, Qt::RoundJoin));
+                drawLineOrArrow();
+            }
+        } else if (object.type == ObjectType::Rectangle) {
+            painter.setPen(object.outlineColor.alpha() > 0
+                               ? QPen(object.outlineColor, object.width, Qt::SolidLine,
+                                      Qt::RoundCap, Qt::RoundJoin)
+                               : Qt::NoPen);
+            painter.drawRect(QRectF(object.start, object.end).normalized());
+        } else if (object.type == ObjectType::Ellipse) {
+            painter.setPen(object.outlineColor.alpha() > 0
+                               ? QPen(object.outlineColor, object.width, Qt::SolidLine,
+                                      Qt::RoundCap, Qt::RoundJoin)
+                               : Qt::NoPen);
+            painter.drawEllipse(QRectF(object.start, object.end).normalized());
+        }
+    }
+    painter.restore();
+}
+
+void SstvComposerCanvas::moveObject(OverlayObject &object, const QPointF &delta) {
+    if (object.type == ObjectType::Text) {
+        object.position += delta;
+    } else if (object.type == ObjectType::Stroke) {
+        for (QPointF &point : object.points)
+            point += delta;
+    } else {
+        object.start += delta;
+        object.end += delta;
+    }
 }
 
 QImage SstvComposerCanvas::renderComposition() const {
@@ -389,56 +825,32 @@ QImage SstvComposerCanvas::renderComposition() const {
     QPainter painter(&frame);
     painter.setRenderHint(QPainter::Antialiasing);
     painter.setRenderHint(QPainter::TextAntialiasing);
-    for (const Stroke &stroke : m_strokes) {
-        if (stroke.points.size() < 2)
-            continue;
-        painter.setPen(QPen(stroke.color, stroke.width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        painter.drawPolyline(stroke.points.constData(), stroke.points.size());
-    }
-    for (const Shape &shape : m_shapes) {
-        painter.setPen(QPen(shape.color, shape.width, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
-        painter.setBrush(Qt::NoBrush);
-        drawShape(painter, shape.type, shape.start, shape.end);
-    }
-    for (const TextBlock &block : m_texts) {
-        painter.setPen(block.color);
-        painter.setFont(block.font);
-        drawTextBlock(painter, block.font, block.position, block.text);
-    }
+    for (const OverlayObject &object : m_objects)
+        drawObject(painter, object);
     return frame;
 }
 
-int SstvComposerCanvas::textAt(const QPointF &point) const {
-    for (int i = m_texts.size() - 1; i >= 0; --i) {
-        const TextBlock &block = m_texts.at(i);
-        const QRectF bounds = textBounds(block.font, block.text);
-        const QRectF hit(block.position.x() - bounds.width() * 0.5 - 10, block.position.y() - bounds.height() * 0.5 - 10,
-                         bounds.width() + 20, bounds.height() + 20);
-        if (hit.contains(point))
-            return i;
-    }
-    return -1;
-}
-
 void SstvComposerCanvas::saveUndo() {
-    m_undo.append({m_texts, m_strokes, m_shapes});
+    m_undo.append({m_objects});
     if (m_undo.size() > MaxHistory)
         m_undo.removeFirst();
     m_redo.clear();
 }
 
 void SstvComposerCanvas::restore(const Snapshot &snapshot) {
-    m_texts = snapshot.texts;
-    m_strokes = snapshot.strokes;
-    m_shapes = snapshot.shapes;
-    m_selectedText = -1;
+    m_objects = snapshot.objects;
+    clearSelection();
     emitChanged();
+}
+
+void SstvComposerCanvas::clearSelection() {
+    m_selectedObject = -1;
 }
 
 void SstvComposerCanvas::emitChanged() {
     update();
     emit compositionChanged();
-    emit selectionChanged(hasSelectedText());
+    emit selectionChanged(hasSelectedObject());
 }
 
 void SstvComposerCanvas::paintEvent(QPaintEvent *) {
@@ -446,19 +858,24 @@ void SstvComposerCanvas::paintEvent(QPaintEvent *) {
     painter.fillRect(rect(), QColor(QStringLiteral("#1b2022")));
     if (m_background.isNull()) {
         painter.setPen(Qt::white);
-        painter.drawText(rect(), Qt::AlignCenter, QStringLiteral("Choose an image from Gallery or Camera"));
+        painter.drawText(rect(), Qt::AlignCenter,
+                         QStringLiteral("Choose an image from Gallery or Camera"));
         return;
     }
     const QRectF target = imageRect();
     painter.drawImage(target, renderComposition());
-    if (hasSelectedText() && m_tool == Tool::Select) {
-        const TextBlock &block = m_texts.at(m_selectedText);
-        const QRectF bounds = textBounds(block.font, block.text);
-        const QPointF topLeft = target.topLeft() + QPointF((block.position.x() - bounds.width() * 0.5) * target.width() / m_background.width(),
-                                                            (block.position.y() - bounds.height() * 0.5) * target.height() / m_background.height());
-        const QSizeF size(bounds.width() * target.width() / m_background.width(), bounds.height() * target.height() / m_background.height());
+    if (hasSelectedObject() && m_tool == Tool::Select) {
+        const OverlayObject &object = m_objects.at(m_selectedObject);
+        QPainterPath selection;
+        selection.addRect(objectBounds(object).adjusted(-4, -4, 4, 4));
+        selection = objectTransform(object).map(selection);
+        QTransform imageToWidget;
+        imageToWidget.translate(target.left(), target.top());
+        imageToWidget.scale(target.width() / m_background.width(),
+                            target.height() / m_background.height());
         painter.setPen(QPen(QColor(QStringLiteral("#f2ad20")), 2, Qt::DashLine));
-        painter.drawRect(QRectF(topLeft, size));
+        painter.setBrush(Qt::NoBrush);
+        painter.drawPath(imageToWidget.map(selection));
     }
 }
 
@@ -469,17 +886,39 @@ void SstvComposerCanvas::mousePressEvent(QMouseEvent *event) {
     m_lastPoint = point;
     if (m_tool == Tool::Draw) {
         saveUndo();
-        m_strokes.append({m_inkColor, m_inkWidth, {point}});
+        OverlayObject object;
+        object.type = ObjectType::Stroke;
+        object.outlineColor = m_outlineColor;
+        object.fillColor = m_fillColor;
+        object.width = m_inkWidth;
+        object.points.append(point);
+        m_objects.append(object);
+        m_selectedObject = m_objects.size() - 1;
         return;
     }
     if (m_tool == Tool::Shape) {
         saveUndo();
-        m_shapes.append({m_shapeType, m_inkColor, m_inkWidth, point, point});
+        OverlayObject object;
+        object.type = objectTypeFromShape(m_shapeType);
+        object.outlineColor = m_outlineColor;
+        object.fillColor = m_fillColor;
+        object.width = m_inkWidth;
+        object.start = point;
+        object.end = point;
+        m_objects.append(object);
+        m_selectedObject = m_objects.size() - 1;
         return;
     }
-    m_selectedText = textAt(point);
-    m_draggingText = hasSelectedText();
-    m_panningBackground = !m_draggingText;
+    const QVector<int> hits = objectsAt(point);
+    if (hits.contains(m_selectedObject)) {
+        // Preserve the current selection so a second touch can drag it instead
+        // of unexpectedly selecting an overlapping object underneath.
+    } else {
+        m_selectedObject = hits.isEmpty() ? -1 : hits.first();
+    }
+    m_lastSelectionPoint = point;
+    m_draggingObject = hasSelectedObject();
+    m_panningBackground = !m_draggingObject;
     m_dragUndoCaptured = false;
     emitChanged();
 }
@@ -488,18 +927,21 @@ void SstvComposerCanvas::mouseMoveEvent(QMouseEvent *event) {
     if (m_background.isNull() || !(event->buttons() & Qt::LeftButton))
         return;
     const QPointF point = imagePoint(event->position());
-    if (m_tool == Tool::Draw && !m_strokes.isEmpty()) {
-        m_strokes.last().points.append(point);
+    if (m_tool == Tool::Draw && !m_objects.isEmpty()
+        && m_objects.last().type == ObjectType::Stroke) {
+        m_objects.last().points.append(point);
         update();
-    } else if (m_tool == Tool::Shape && !m_shapes.isEmpty()) {
-        m_shapes.last().end = point;
+    } else if (m_tool == Tool::Shape && !m_objects.isEmpty()
+               && m_objects.last().type != ObjectType::Text
+               && m_objects.last().type != ObjectType::Stroke) {
+        m_objects.last().end = point;
         update();
-    } else if (m_draggingText && hasSelectedText()) {
+    } else if (m_draggingObject && hasSelectedObject()) {
         if (!m_dragUndoCaptured) {
             saveUndo();
             m_dragUndoCaptured = true;
         }
-        m_texts[m_selectedText].position += point - m_lastPoint;
+        moveObject(m_objects[m_selectedObject], point - m_lastPoint);
         m_lastPoint = point;
         update();
     } else if (m_tool == Tool::Select && m_panningBackground) {
@@ -514,9 +956,17 @@ void SstvComposerCanvas::mouseMoveEvent(QMouseEvent *event) {
 void SstvComposerCanvas::mouseReleaseEvent(QMouseEvent *event) {
     if (event->button() != Qt::LeftButton)
         return;
-    const bool changed = (m_tool == Tool::Draw && !m_strokes.isEmpty())
-        || (m_tool == Tool::Shape && !m_shapes.isEmpty()) || m_draggingText;
-    m_draggingText = false;
+    if (m_tool == Tool::Shape && !m_objects.isEmpty()
+        && m_objects.last().type != ObjectType::Text
+        && m_objects.last().type != ObjectType::Stroke) {
+        // Touch streams do not always deliver a final move event at the same
+        // coordinate as release. Finish the shape, including an arrow tip,
+        // at the point where the operator actually lifts their finger.
+        m_objects.last().end = imagePoint(event->position());
+    }
+    const bool changed = (m_tool == Tool::Draw && !m_objects.isEmpty())
+        || (m_tool == Tool::Shape && !m_objects.isEmpty()) || m_draggingObject;
+    m_draggingObject = false;
     m_panningBackground = false;
     m_dragUndoCaptured = false;
     if (changed)

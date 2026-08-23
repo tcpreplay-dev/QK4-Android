@@ -3073,6 +3073,18 @@ void MainWindow::setupUi() {
         // Send the command to the radio
         m_tcpClient->sendCAT(catCmd);
 
+        // Keep the affected VFO label and the next mode-popup tap responsive
+        // while waiting for K4 auto-info. This mirrors the established DT
+        // optimistic path below; a later MD/MD$ response remains authoritative.
+        QRegularExpression mdRegex(QStringLiteral("MD(\\$?)([69]);"));
+        QRegularExpressionMatch mdMatch = mdRegex.match(catCmd);
+        if (mdMatch.hasMatch()) {
+            const QString optimisticMode = mdMatch.captured(1).isEmpty()
+                ? QStringLiteral("MD%1;").arg(mdMatch.captured(2))
+                : QStringLiteral("MD$%1;").arg(mdMatch.captured(2));
+            m_radioState->parseCATCommand(optimisticMode);
+        }
+
         // Optimistically update data sub-mode (K4 doesn't echo DT SET commands)
         // Parse DT or DT$ from command like "MD6;DT1;" or "MD$6;DT$3;"
         QRegularExpression dtRegex("DT(\\$?)(\\d)");

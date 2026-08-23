@@ -610,8 +610,8 @@ void MiniPanRhiWidget::render(QRhiCommandBuffer *cb) {
                     // CW-R: positive offset moves passband left (lower freq)
                     passbandX = centerX - offsetPixels - bwPixels / 2;
                 }
-            } else if (m_mode == "LSB") {
-                // LSB: passband center is shiftHz below carrier
+            } else if (m_mode == "LSB" || m_mode == "DATA-R") {
+                // LSB/DATA-R: passband center is shiftHz below carrier
                 // Passband left edge = center - shiftPixels - bwPixels/2
                 // Passband right edge = center - shiftPixels + bwPixels/2
                 // With shift=BW/2, right edge touches center line
@@ -745,14 +745,14 @@ void MiniPanRhiWidget::render(QRhiCommandBuffer *cb) {
             // In CW-R: passband center = tunedFreq - cwPitch, notch RF = tunedFreq - NM.
             // So offset from center = -(NM - cwPitch).
             int offsetHz;
-            if (m_mode == "LSB") {
+            if (m_mode == "LSB" || m_mode == "DATA-R") {
                 offsetHz = -m_notchPitchHz;
             } else if (m_mode == "CW") {
                 offsetHz = m_notchPitchHz - m_cwPitch;
             } else if (m_mode == "CW-R") {
                 offsetHz = -(m_notchPitchHz - m_cwPitch);
             } else {
-                // USB, DATA, DATA-R, AM, FM
+                // USB, DATA, AM, FM
                 offsetHz = m_notchPitchHz;
             }
 

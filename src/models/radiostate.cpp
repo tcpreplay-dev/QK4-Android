@@ -338,7 +338,10 @@ QString RadioState::dataSubModeToString(int subMode) {
 QString RadioState::modeStringFull() const {
     // For DATA/DATA-R modes, show the sub-mode instead
     if (m_mode == DATA || m_mode == DATA_R) {
-        return dataSubModeToString(m_dataSubMode);
+        QString label = dataSubModeToString(m_dataSubMode);
+        if (m_mode == DATA_R)
+            label += QStringLiteral("-R");
+        return label;
     }
     return modeToString(m_mode);
 }
@@ -346,7 +349,10 @@ QString RadioState::modeStringFull() const {
 QString RadioState::modeStringFullB() const {
     // For DATA/DATA-R modes, show the sub-mode instead
     if (m_modeB == DATA || m_modeB == DATA_R) {
-        return dataSubModeToString(m_dataSubModeB);
+        QString label = dataSubModeToString(m_dataSubModeB);
+        if (m_modeB == DATA_R)
+            label += QStringLiteral("-R");
+        return label;
     }
     return modeToString(m_modeB);
 }

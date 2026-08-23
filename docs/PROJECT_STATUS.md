@@ -1,8 +1,18 @@
 # Project status
 
-Last updated: 2026-08-22
+Last updated: 2026-08-23
 
 ## Released build
+
+**QK4 Mobile v1.0.1** adds K4-compatible reverse alternate taps for DATA,
+AFSK, FSK, and PSK, including reverse-aware VFO labels and panadapter/mini-pan
+orientation. It also refines both SSTV image editors with selectable ordered
+objects, shape fill/outline controls, 45-degree object rotation, true
+undo/redo, dynamic callsign variables, responsive portrait/landscape layouts,
+and a shared 12-112 px text-size range while retaining existing saved-template
+compatibility. Android version code is 27. All 16 focused SSTV composer tests
+pass, and the release-signed ARM64 package was installed in place and tested
+successfully on the Samsung Galaxy S26 Ultra.
 
 **QK4 Mobile v1.0** is the first complete QK4 Mobile release with integrated
 CW device support and integrated SSTV. The new SSTV workspace provides

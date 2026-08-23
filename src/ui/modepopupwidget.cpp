@@ -125,6 +125,23 @@ void ModePopupWidget::updateButtonStyles() {
     // Update CW button text based on current mode
     m_cwBtn->setText(m_currentMode == MODE_CW_R ? "CW-R" : "CW");
 
+    // DATA reverse is an MD state shared with the currently selected DT
+    // sub-mode. Match the K4 mode-button group by showing the reverse suffix
+    // on the affected data button, while leaving the other data choices at
+    // their normal labels.
+    m_dataBtn->setText("DATA");
+    m_afskBtn->setText("AFSK");
+    m_fskBtn->setText("FSK");
+    m_pskBtn->setText("PSK");
+    if (m_currentMode == MODE_DATA_R) {
+        switch (m_currentDataSubMode) {
+        case DT_DATA_A: m_dataBtn->setText("DATA-R"); break;
+        case DT_AFSK_A: m_afskBtn->setText("AFSK-R"); break;
+        case DT_FSK_D: m_fskBtn->setText("FSK-R"); break;
+        case DT_PSK_D: m_pskBtn->setText("PSK-R"); break;
+        }
+    }
+
     // Reset all buttons to normal style
     for (auto it = m_buttonMap.begin(); it != m_buttonMap.end(); ++it) {
         it.value()->setStyleSheet(K4Styles::popupButtonNormal());
@@ -224,18 +241,31 @@ void ModePopupWidget::onModeButtonClicked() {
             // Not in SSB - use band-appropriate default
             cmd = prefix + QString::number(bandDefaultSideband()) + ";";
         }
-    } else if (modeType == "DATA") {
-        cmd = prefix + "6;" + dtPrefix + "0;"; // DATA mode + DATA-A sub-mode
-    } else if (modeType == "AFSK") {
-        cmd = prefix + "6;" + dtPrefix + "1;"; // DATA mode + AFSK-A sub-mode
+    } else if (modeType == "DATA" || modeType == "AFSK"
+               || modeType == "FSK" || modeType == "PSK") {
+        int requestedSubMode = DT_DATA_A;
+        if (modeType == "AFSK")
+            requestedSubMode = DT_AFSK_A;
+        else if (modeType == "FSK")
+            requestedSubMode = DT_FSK_D;
+        else if (modeType == "PSK")
+            requestedSubMode = DT_PSK_D;
+
+        // A normal tap selects a data sub-mode. Tapping the already-selected
+        // data button again performs the K4 alternate action: normal ->
+        // reverse -> normal. MD carries the direction and DT keeps the exact
+        // DATA-A/AFSK-A/FSK-D/PSK-D selection.
+        const bool sameSubMode = (m_currentMode == MODE_DATA
+                                  || m_currentMode == MODE_DATA_R)
+                                 && m_currentDataSubMode == requestedSubMode;
+        const int requestedMode = sameSubMode && m_currentMode == MODE_DATA
+                                      ? MODE_DATA_R : MODE_DATA;
+        cmd = prefix + QString::number(requestedMode) + ";"
+              + dtPrefix + QString::number(requestedSubMode) + ";";
     } else if (modeType == "AM") {
         cmd = prefix + "5;";
     } else if (modeType == "FM") {
         cmd = prefix + "4;";
-    } else if (modeType == "PSK") {
-        cmd = prefix + "6;" + dtPrefix + "3;"; // DATA mode + PSK-D sub-mode
-    } else if (modeType == "FSK") {
-        cmd = prefix + "6;" + dtPrefix + "2;"; // DATA mode + FSK-D sub-mode
     }
 
     if (!cmd.isEmpty()) {

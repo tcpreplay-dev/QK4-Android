@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(QK4 VERSION 1.0 LANGUAGES CXX)
+project(QK4 VERSION 1.0.1 LANGUAGES CXX)
 include(CTest)
 
 # Optional override paths for Opus when cross-compiling (primarily Android)
@@ -625,6 +625,19 @@ if(BUILD_TESTING AND NOT ANDROID)
     target_include_directories(test_radiostate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_radiostate PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME radiostate COMMAND test_radiostate)
+
+    qt_add_executable(test_modepopupwidget
+        tests/test_modepopupwidget.cpp
+        src/ui/modepopupwidget.cpp
+        src/ui/modepopupwidget.h
+        src/ui/k4popupbase.cpp
+        src/ui/k4popupbase.h
+        src/ui/k4styles.cpp
+        src/ui/k4styles.h
+    )
+    target_include_directories(test_modepopupwidget PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_modepopupwidget PRIVATE Qt6::Core Qt6::Gui Qt6::Widgets Qt6::Test)
+    add_test(NAME modepopupwidget COMMAND test_modepopupwidget)
 
     qt_add_executable(test_sstvencoder
         tests/test_sstvencoder.cpp

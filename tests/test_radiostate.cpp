@@ -9,6 +9,7 @@ class RadioStateTest : public QObject {
 private slots:
     void transmitQueryConfirmsState();
     void malformedTransmitQueryIsIgnored();
+    void reverseDataSubModesUseDistinctDisplayLabels();
 };
 
 void RadioStateTest::transmitQueryConfirmsState() {
@@ -39,6 +40,29 @@ void RadioStateTest::malformedTransmitQueryIsIgnored() {
     state.parseCATCommand(QStringLiteral("TQ2;"));
     QVERIFY(!state.isTransmitting());
     QCOMPARE(spy.size(), 0);
+}
+
+void RadioStateTest::reverseDataSubModesUseDistinctDisplayLabels() {
+    RadioState state;
+
+    state.parseCATCommand(QStringLiteral("MD6;"));
+    state.parseCATCommand(QStringLiteral("DT0;"));
+    QCOMPARE(state.modeStringFull(), QStringLiteral("DATA"));
+
+    state.parseCATCommand(QStringLiteral("MD9;"));
+    QCOMPARE(state.modeStringFull(), QStringLiteral("DATA-R"));
+    state.parseCATCommand(QStringLiteral("DT1;"));
+    QCOMPARE(state.modeStringFull(), QStringLiteral("AFSK-R"));
+    state.parseCATCommand(QStringLiteral("DT2;"));
+    QCOMPARE(state.modeStringFull(), QStringLiteral("FSK-R"));
+    state.parseCATCommand(QStringLiteral("DT3;"));
+    QCOMPARE(state.modeStringFull(), QStringLiteral("PSK-R"));
+
+    state.parseCATCommand(QStringLiteral("MD$9;"));
+    state.parseCATCommand(QStringLiteral("DT$1;"));
+    QCOMPARE(state.modeStringFullB(), QStringLiteral("AFSK-R"));
+    state.parseCATCommand(QStringLiteral("MD$6;"));
+    QCOMPARE(state.modeStringFullB(), QStringLiteral("AFSK"));
 }
 
 QTEST_MAIN(RadioStateTest)

@@ -81,7 +81,9 @@ private:
     void saveCurrentReceiveCallsign(bool manual);
     void replyToCurrentReceive();
     void addOrEditText();
+    void addVariableText(const QString &token);
     void chooseInkColor();
+    void chooseFillColor();
     void refreshTemplates(const QString &selectName = QString());
     void applySelectedTemplate();
     void saveUserTemplate();
@@ -162,8 +164,16 @@ private:
     QPushButton *m_selectToolButton = nullptr;
     QPushButton *m_drawToolButton = nullptr;
     QPushButton *m_shapeToolButton = nullptr;
+    QPushButton *m_arrowToolButton = nullptr;
+    QPushButton *m_rectangleToolButton = nullptr;
+    QPushButton *m_ellipseToolButton = nullptr;
     QPushButton *m_textButton = nullptr;
+    QPushButton *m_myCallVariableButton = nullptr;
+    QPushButton *m_toCallVariableButton = nullptr;
     QPushButton *m_colorButton = nullptr;
+    QPushButton *m_fillColorButton = nullptr;
+    QPushButton *m_rotateObjectLeftButton = nullptr;
+    QPushButton *m_rotateObjectRightButton = nullptr;
     QPushButton *m_undoButton = nullptr;
     QPushButton *m_redoButton = nullptr;
     QPushButton *m_resetCompositionButton = nullptr;
@@ -199,8 +209,8 @@ private:
     bool m_fitBars = false;
     bool m_restoringDraft = false;
     bool m_draftSourceDirty = true;
-    QColor m_composerColor = Qt::white;
-    int m_shapeTypeIndex = 0;
+    QColor m_composerColor = Qt::black;
+    QColor m_composerFillColor = Qt::white;
     QSlider *m_txSliderDragTarget = nullptr;
     QPoint m_txSliderPressPosition;
     int m_txSliderLastY = 0;

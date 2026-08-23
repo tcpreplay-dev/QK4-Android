@@ -49,6 +49,7 @@
 #include <QScrollBar>
 #include <QStackedWidget>
 #include <QSpinBox>
+#include <QSpacerItem>
 #include <QStyle>
 #include <QTransform>
 #include <QVBoxLayout>
@@ -66,6 +67,12 @@ constexpr int SstvDialogBodyPx = 11;
 constexpr int SstvDialogInputPx = 12;
 constexpr int SstvDialogButtonPx = 11;
 constexpr int SstvDialogControlHeight = 34;
+// Keep the main TX composer and saved-template editor on one native-frame
+// text-size scale. A 112 px ceiling lets a callsign occupy most of a 320 px
+// SSTV frame while the common constants prevent the two editors drifting.
+constexpr int SstvTextSizeMinimumPx = 12;
+constexpr int SstvTextSizeMaximumPx = 112;
+constexpr int SstvTextSizeDefaultPx = 28;
 
 enum class SstvGlyph {
     Move, Draw, Line, Arrow, Rectangle, Ellipse, Color, RotateLeft, RotateRight,
@@ -159,13 +166,15 @@ QIcon sstvGlyph(SstvGlyph glyph, const QColor &accent = QColor(QStringLiteral("#
         break;
     case SstvGlyph::Undo:
     case SstvGlyph::Redo: {
-        const bool undo = glyph == SstvGlyph::Undo;
-        painter.drawArc(QRectF(10, 12, 29, 27), undo ? -45 * 16 : 45 * 16,
-                        undo ? 245 * 16 : -245 * 16);
-        if (undo)
-            arrowHead({6, 15}, {18, 10}, {15, 23});
-        else
-            arrowHead({42, 15}, {30, 10}, {33, 23});
+        // Draw one canonical undo symbol and mirror the entire painter for
+        // redo. This guarantees that redo is an exact horizontal mirror,
+        // including its arc and arrowhead.
+        if (glyph == SstvGlyph::Redo) {
+            painter.translate(48.0, 0.0);
+            painter.scale(-1.0, 1.0);
+        }
+        painter.drawArc(QRectF(10, 12, 29, 27), -45 * 16, 245 * 16);
+        arrowHead({6, 15}, {18, 10}, {15, 23});
         break;
     }
     case SstvGlyph::Trash:
@@ -296,7 +305,8 @@ bool askSstvTxQuestion(QWidget *parent, const QString &title, const QString &mes
 }
 
 QString promptSstvTxText(QWidget *parent, const QString &title, const QString &label,
-                         const QString &initialText, bool multiline, bool *accepted) {
+                         const QString &initialText, bool multiline, bool *accepted,
+                         bool allowCallsignTokens = false) {
     if (accepted)
         *accepted = false;
 
@@ -340,6 +350,31 @@ QString promptSstvTxText(QWidget *parent, const QString &title, const QString &l
         layout->addWidget(singleEditor);
     }
 
+    if (allowCallsignTokens && multiEditor) {
+        auto *tokenButtons = new QHBoxLayout;
+        tokenButtons->setSpacing(12);
+        auto *myCall = new QPushButton(QStringLiteral("MY CALL"), panel);
+        auto *toCall = new QPushButton(QStringLiteral("TO CALL"), panel);
+        for (QPushButton *button : {myCall, toCall}) {
+            button->setFixedHeight(SstvDialogControlHeight);
+            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+            button->setStyleSheet(sstvDialogButtonStyle(QStringLiteral("#6dd4ef")));
+        }
+        myCall->setToolTip(QStringLiteral("Insert {MY_CALL}"));
+        toCall->setToolTip(QStringLiteral("Insert {TO_CALL}"));
+        QObject::connect(myCall, &QPushButton::clicked, multiEditor, [multiEditor]() {
+            multiEditor->insertPlainText(SstvComposerCanvas::myCallToken());
+            multiEditor->setFocus(Qt::OtherFocusReason);
+        });
+        QObject::connect(toCall, &QPushButton::clicked, multiEditor, [multiEditor]() {
+            multiEditor->insertPlainText(SstvComposerCanvas::toCallToken());
+            multiEditor->setFocus(Qt::OtherFocusReason);
+        });
+        tokenButtons->addWidget(myCall, 1);
+        tokenButtons->addWidget(toCall, 1);
+        layout->addLayout(tokenButtons);
+    }
+
     auto *buttons = new QHBoxLayout;
     buttons->setSpacing(12);
     auto *cancel = new QPushButton(QStringLiteral("CANCEL"), panel);
@@ -356,7 +391,7 @@ QString promptSstvTxText(QWidget *parent, const QString &title, const QString &l
     buttons->addWidget(ok, 1);
     layout->addLayout(buttons);
 
-    const int preferredHeight = multiline ? 220 : 165;
+    const int preferredHeight = multiline ? (allowCallsignTokens ? 260 : 220) : 165;
     dialog.setPanelSize(sstvDialogPanelSize(parent, multiline ? 590 : 520, preferredHeight));
     if (multiEditor) {
         QTimer::singleShot(0, multiEditor, [multiEditor]() {
@@ -377,7 +412,9 @@ QString promptSstvTxText(QWidget *parent, const QString &title, const QString &l
     return multiline ? multiEditor->toPlainText() : singleEditor->text();
 }
 
-QColor promptSstvMarkupColor(QWidget *parent, const QColor &currentColor) {
+QColor promptSstvMarkupColor(QWidget *parent, const QColor &currentColor,
+                            const QString &dialogTitle = QStringLiteral("MARKUP COLOR"),
+                            bool allowNoFill = false) {
     struct PaletteEntry {
         const char *name;
         const char *hex;
@@ -409,7 +446,7 @@ QColor promptSstvMarkupColor(QWidget *parent, const QColor &currentColor) {
     layout->setContentsMargins(8, 6, 8, 6);
     layout->setSpacing(5);
 
-    auto *title = new QLabel(QStringLiteral("MARKUP COLOR"), panel);
+    auto *title = new QLabel(dialogTitle, panel);
     title->setAlignment(Qt::AlignCenter);
     title->setStyleSheet(
         QStringLiteral("color: white; font-size: %1px; font-weight: 700;")
@@ -424,6 +461,30 @@ QColor promptSstvMarkupColor(QWidget *parent, const QColor &currentColor) {
     // places two four-shade families on each row without growing the dialog.
     const int columns = parent && parent->width() < 520 ? 4 : 8;
     QColor selected;
+    int cellIndex = 0;
+    if (allowNoFill) {
+        const bool choosingOutline = dialogTitle.contains(QStringLiteral("OUTLINE"),
+                                                          Qt::CaseInsensitive);
+        const QString transparentLabel = choosingOutline
+            ? QStringLiteral("NO OUTLINE") : QStringLiteral("TRANSPARENT");
+        auto *noFill = new QPushButton(transparentLabel, panel);
+        noFill->setMinimumHeight(32);
+        noFill->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        noFill->setAccessibleName(QStringLiteral("Select %1").arg(transparentLabel.toLower()));
+        noFill->setToolTip(transparentLabel);
+        noFill->setStyleSheet(
+            QStringLiteral("QPushButton { background: #202426; color: white; border: 3px solid %1; "
+                           "border-radius: 6px; padding: 3px; font-size: 9px; font-weight: 700; }")
+                .arg(currentColor.alpha() == 0 ? QStringLiteral("#f2ad20")
+                                               : QStringLiteral("#858585")));
+        grid->addWidget(noFill, 0, 0);
+        QObject::connect(noFill, &QPushButton::clicked, &dialog,
+                         [&dialog, &selected]() {
+            selected = QColor(Qt::transparent);
+            dialog.accept();
+        });
+        ++cellIndex;
+    }
     for (int index = 0; index < static_cast<int>(std::size(palette)); ++index) {
         const PaletteEntry &entry = palette[index];
         const QColor color(QString::fromLatin1(entry.hex));
@@ -443,7 +504,8 @@ QColor promptSstvMarkupColor(QWidget *parent, const QColor &currentColor) {
                            "border-radius: 6px; padding: 3px; } "
                            "QPushButton:pressed { border-color: white; }")
                 .arg(color.name(), dark ? QStringLiteral("white") : QStringLiteral("black"), border));
-        grid->addWidget(swatch, index / columns, index % columns);
+        grid->addWidget(swatch, cellIndex / columns, cellIndex % columns);
+        ++cellIndex;
         QObject::connect(swatch, &QPushButton::clicked, &dialog,
                          [&dialog, &selected, color]() {
             selected = color;
@@ -1023,6 +1085,7 @@ void SstvScreen::setupUi() {
         }
         if (candidate == m_operatorCallsign) {
             m_callsignEdit->setText(candidate);
+            m_composer->setCallsignValues(candidate, m_replyCallsign);
             return;
         }
         m_operatorCallsign = candidate;
@@ -1030,6 +1093,7 @@ void SstvScreen::setupUi() {
         QSettings settings(QStringLiteral("QK4"), QStringLiteral("QK4"));
         settings.setValue(QStringLiteral("sstv/operatorCallsign"), m_operatorCallsign);
         settings.sync();
+        m_composer->setCallsignValues(m_operatorCallsign, m_replyCallsign);
         refreshTemplates();
         cancelTransmitConfirmation();
         m_txStateLabel->setText(m_operatorCallsign.isEmpty()
@@ -1051,9 +1115,11 @@ void SstvScreen::setupUi() {
     controls->addLayout(toCallRow);
     connect(m_toCallsignEdit, &QLineEdit::textChanged, this, [this](const QString &text) {
         m_replyCallsign = text.trimmed().toUpper();
+        m_composer->setCallsignValues(m_operatorCallsign, m_replyCallsign);
         QSettings settings(QStringLiteral("QK4"), QStringLiteral("QK4"));
         settings.setValue(QStringLiteral("sstv/lastToCallsign"), m_replyCallsign);
     });
+    m_composer->setCallsignValues(m_operatorCallsign, m_replyCallsign);
     m_galleryButton = new QPushButton(QStringLiteral("GALLERY"), transmitPage);
     m_galleryButton->setStyleSheet(buttonStyle(QStringLiteral("#f2ad20")));
     connect(m_galleryButton, &QPushButton::clicked, this, &SstvScreen::chooseImage);
@@ -1119,22 +1185,47 @@ void SstvScreen::setupUi() {
     m_selectToolButton = new QPushButton(transmitPage);
     m_drawToolButton = new QPushButton(transmitPage);
     m_shapeToolButton = new QPushButton(transmitPage);
+    m_arrowToolButton = new QPushButton(transmitPage);
+    m_rectangleToolButton = new QPushButton(transmitPage);
+    m_ellipseToolButton = new QPushButton(transmitPage);
     m_textButton = new QPushButton(QStringLiteral("ADD TEXT"), transmitPage);
-    m_textButton->setMinimumWidth(90);
+    m_textButton->setFixedWidth(82);
+    m_myCallVariableButton = new QPushButton(QStringLiteral("MY CALL"), transmitPage);
+    m_toCallVariableButton = new QPushButton(QStringLiteral("TO CALL"), transmitPage);
     m_colorButton = new QPushButton(transmitPage);
+    m_fillColorButton = new QPushButton(transmitPage);
     for (QPushButton *button : {m_selectToolButton, m_drawToolButton, m_shapeToolButton,
-                                m_textButton, m_colorButton})
+                                m_arrowToolButton, m_rectangleToolButton, m_ellipseToolButton,
+                                m_textButton, m_myCallVariableButton, m_toCallVariableButton,
+                                m_colorButton, m_fillColorButton})
         button->setStyleSheet(buttonStyle(QStringLiteral("#6dd4ef")));
     makeIconButton(m_selectToolButton, SstvGlyph::Move, QStringLiteral("Move/select objects"));
     makeIconButton(m_drawToolButton, SstvGlyph::Draw, QStringLiteral("Freehand draw"));
-    makeIconButton(m_shapeToolButton, SstvGlyph::Line, QStringLiteral("Draw line; tap again for next shape"));
-    makeIconButton(m_colorButton, SstvGlyph::Color, QStringLiteral("Choose markup color"), m_composerColor);
+    makeIconButton(m_shapeToolButton, SstvGlyph::Line, QStringLiteral("Draw line"));
+    makeIconButton(m_arrowToolButton, SstvGlyph::Arrow, QStringLiteral("Draw arrow"));
+    makeIconButton(m_rectangleToolButton, SstvGlyph::Rectangle, QStringLiteral("Draw rectangle"));
+    makeIconButton(m_ellipseToolButton, SstvGlyph::Ellipse, QStringLiteral("Draw ellipse"));
+    makeIconButton(m_colorButton, SstvGlyph::Color,
+                   QStringLiteral("Choose the thin object outline color"),
+                   m_composerColor);
+    makeIconButton(m_fillColorButton, SstvGlyph::Color,
+                   QStringLiteral("Choose text/line color or rectangle/ellipse fill color"),
+                   m_composerFillColor);
     toolRow->addWidget(m_selectToolButton);
     toolRow->addWidget(m_drawToolButton);
     toolRow->addWidget(m_shapeToolButton);
-    toolRow->addWidget(m_textButton, 1);
+    toolRow->addWidget(m_arrowToolButton);
+    toolRow->addWidget(m_rectangleToolButton);
+    toolRow->addWidget(m_ellipseToolButton);
     toolRow->addWidget(m_colorButton);
+    toolRow->addWidget(m_fillColorButton);
     controls->addLayout(toolRow);
+    auto *objectStyleRow = new QHBoxLayout;
+    objectStyleRow->addWidget(m_textButton);
+    objectStyleRow->addWidget(m_myCallVariableButton);
+    objectStyleRow->addWidget(m_toCallVariableButton);
+    objectStyleRow->addStretch(1);
+    controls->addLayout(objectStyleRow);
     connect(m_selectToolButton, &QPushButton::clicked, this, [this]() {
         m_composer->setTool(SstvComposerCanvas::Tool::Select);
         updateComposerControls();
@@ -1143,24 +1234,30 @@ void SstvScreen::setupUi() {
         m_composer->setTool(SstvComposerCanvas::Tool::Draw);
         updateComposerControls();
     });
-    connect(m_shapeToolButton, &QPushButton::clicked, this, [this]() {
-        static const QStringList labels{QStringLiteral("LINE"), QStringLiteral("ARROW"),
-                                        QStringLiteral("RECT"), QStringLiteral("ELLIPSE")};
-        if (m_composer->tool() == SstvComposerCanvas::Tool::Shape)
-            m_shapeTypeIndex = (m_shapeTypeIndex + 1) % labels.size();
-        m_composer->setShapeType(static_cast<SstvComposerCanvas::ShapeType>(m_shapeTypeIndex));
+    const auto activateShapeTool = [this](SstvComposerCanvas::ShapeType type) {
+        m_composer->setShapeType(type);
         m_composer->setTool(SstvComposerCanvas::Tool::Shape);
-        static const QVector<SstvGlyph> glyphs{SstvGlyph::Line, SstvGlyph::Arrow,
-                                               SstvGlyph::Rectangle, SstvGlyph::Ellipse};
-        m_shapeToolButton->setIcon(sstvGlyph(glyphs.at(m_shapeTypeIndex)));
-        m_shapeToolButton->setToolTip(QStringLiteral("Draw %1; tap again for next shape")
-                                         .arg(labels.at(m_shapeTypeIndex).toLower()));
-        m_shapeToolButton->setAccessibleName(QStringLiteral("Draw %1 shape; tap again for next shape")
-                                                 .arg(labels.at(m_shapeTypeIndex).toLower()));
         updateComposerControls();
-    });
+    };
+    connect(m_shapeToolButton, &QPushButton::clicked, this,
+            [activateShapeTool]() { activateShapeTool(SstvComposerCanvas::ShapeType::Line); });
+    connect(m_arrowToolButton, &QPushButton::clicked, this,
+            [activateShapeTool]() { activateShapeTool(SstvComposerCanvas::ShapeType::Arrow); });
+    connect(m_rectangleToolButton, &QPushButton::clicked, this,
+            [activateShapeTool]() { activateShapeTool(SstvComposerCanvas::ShapeType::Rectangle); });
+    connect(m_ellipseToolButton, &QPushButton::clicked, this,
+            [activateShapeTool]() { activateShapeTool(SstvComposerCanvas::ShapeType::Ellipse); });
     connect(m_textButton, &QPushButton::clicked, this, &SstvScreen::addOrEditText);
+    connect(m_myCallVariableButton, &QPushButton::clicked, this, [this]() {
+        addVariableText(SstvComposerCanvas::myCallToken());
+    });
+    connect(m_toCallVariableButton, &QPushButton::clicked, this, [this]() {
+        addVariableText(SstvComposerCanvas::toCallToken());
+    });
     connect(m_colorButton, &QPushButton::clicked, this, &SstvScreen::chooseInkColor);
+    connect(m_fillColorButton, &QPushButton::clicked, this, &SstvScreen::chooseFillColor);
+    m_composer->setInk(m_composerColor, 4);
+    m_composer->setFillColor(m_composerFillColor);
 
     auto *typeRow = new QHBoxLayout;
     m_fontCombo = new QComboBox(transmitPage);
@@ -1234,8 +1331,8 @@ void SstvScreen::setupUi() {
                     QFont::Normal, true);
     addComposerFont(QStringLiteral("INTER BOLD"), QStringLiteral("Inter"), QFont::Bold);
     m_textSizeSlider = new QSlider(Qt::Horizontal, transmitPage);
-    m_textSizeSlider->setRange(12, 56);
-    m_textSizeSlider->setValue(28);
+    m_textSizeSlider->setRange(SstvTextSizeMinimumPx, SstvTextSizeMaximumPx);
+    m_textSizeSlider->setValue(SstvTextSizeDefaultPx);
     m_textSizeSlider->setMinimumHeight(32);
     m_textSizeSlider->setStyleSheet(
         K4Styles::sliderHorizontal(K4Styles::Colors::DarkBackground,
@@ -1247,27 +1344,38 @@ void SstvScreen::setupUi() {
     typeRow->addWidget(m_textSizeSlider, 3);
     controls->addLayout(typeRow);
     auto *historyRow = new QHBoxLayout;
+    m_rotateObjectLeftButton = new QPushButton(transmitPage);
+    m_rotateObjectRightButton = new QPushButton(transmitPage);
     m_undoButton = new QPushButton(transmitPage);
     m_redoButton = new QPushButton(transmitPage);
     m_deleteObjectButton = new QPushButton(transmitPage);
     m_resetCompositionButton = new QPushButton(QStringLiteral("RESET"), transmitPage);
-    for (QPushButton *button : {m_undoButton, m_redoButton, m_deleteObjectButton,
+    for (QPushButton *button : {m_rotateObjectLeftButton, m_rotateObjectRightButton,
+                                m_undoButton, m_redoButton, m_deleteObjectButton,
                                 m_resetCompositionButton})
         button->setStyleSheet(buttonStyle(QStringLiteral("#6dd4ef")));
-    // Reuse the exact source-image rotation glyphs so both circular-arrow
-    // pairs have identical geometry and arrowhead orientation.
-    makeIconButton(m_undoButton, SstvGlyph::RotateLeft, QStringLiteral("Undo"));
-    makeIconButton(m_redoButton, SstvGlyph::RotateRight, QStringLiteral("Redo"));
+    makeIconButton(m_rotateObjectLeftButton, SstvGlyph::RotateLeft,
+                   QStringLiteral("Rotate selected object left 45 degrees"));
+    makeIconButton(m_rotateObjectRightButton, SstvGlyph::RotateRight,
+                   QStringLiteral("Rotate selected object right 45 degrees"));
+    makeIconButton(m_undoButton, SstvGlyph::Undo, QStringLiteral("Undo last edit"));
+    makeIconButton(m_redoButton, SstvGlyph::Redo, QStringLiteral("Redo last edit"));
     makeIconButton(m_deleteObjectButton, SstvGlyph::Trash, QStringLiteral("Delete selected object"));
+    historyRow->addWidget(m_rotateObjectRightButton);
+    historyRow->addWidget(m_rotateObjectLeftButton);
     historyRow->addWidget(m_undoButton);
     historyRow->addWidget(m_redoButton);
-    historyRow->addWidget(m_deleteObjectButton);
     historyRow->addWidget(m_resetCompositionButton);
+    historyRow->addWidget(m_deleteObjectButton);
     controls->addLayout(historyRow);
+    connect(m_rotateObjectLeftButton, &QPushButton::clicked, m_composer,
+            [this]() { m_composer->rotateSelectedObject(-45); });
+    connect(m_rotateObjectRightButton, &QPushButton::clicked, m_composer,
+            [this]() { m_composer->rotateSelectedObject(45); });
     connect(m_undoButton, &QPushButton::clicked, m_composer, &SstvComposerCanvas::undo);
     connect(m_redoButton, &QPushButton::clicked, m_composer, &SstvComposerCanvas::redo);
     connect(m_deleteObjectButton, &QPushButton::clicked,
-            m_composer, &SstvComposerCanvas::deleteSelectedText);
+            m_composer, &SstvComposerCanvas::deleteSelectedObject);
     connect(m_resetCompositionButton, &QPushButton::clicked, this, [this]() {
         if (askSstvTxQuestion(this, QStringLiteral("Reset composition"),
                               QStringLiteral("Remove all added text and drawing?"),
@@ -1280,12 +1388,12 @@ void SstvScreen::setupUi() {
     });
     connect(m_textSizeSlider, &QSlider::valueChanged, this, [this](int value) {
         m_composer->setInk(m_composerColor, qMax(2, value / 5));
-        m_composer->updateSelectedTextFont(composerFontFromControls());
+        m_composer->updateSelectedSize(value);
     });
     connect(m_composer, &SstvComposerCanvas::selectionChanged, this,
-            [this](bool selected) {
-        if (selected)
-            syncTextControlsFromSelection();
+            [this](bool) {
+        syncTextControlsFromSelection();
+        updateComposerControls();
     });
     connect(m_composer, &SstvComposerCanvas::compositionChanged, this, [this]() {
         cancelTransmitConfirmation();
@@ -1378,6 +1486,20 @@ void SstvScreen::setupUi() {
         if (m_modeFrame.isNull())
             return;
         if (!m_transmitConfirmationPending) {
+            QString unresolvedVariable;
+            if (m_composer->hasUnresolvedVariables(&unresolvedVariable)) {
+                if (unresolvedVariable.compare(SstvComposerCanvas::myCallToken(),
+                                               Qt::CaseInsensitive) == 0) {
+                    m_txStateLabel->setText(
+                        QStringLiteral("ENTER MY CALL BEFORE TRANSMITTING THIS TEMPLATE"));
+                    m_callsignEdit->setFocus();
+                } else {
+                    m_txStateLabel->setText(
+                        QStringLiteral("ENTER TO CALL BEFORE TRANSMITTING THIS TEMPLATE"));
+                    m_toCallsignEdit->setFocus();
+                }
+                return;
+            }
             const SstvModeSpec *mode = SstvModeRegistry::find(
                 static_cast<SstvModeId>(m_modeCombo->currentData().toInt()));
             m_frozenTransmitFrame = m_composer->renderedImage();
@@ -2029,12 +2151,20 @@ void SstvScreen::updateTransmitUi() {
     m_selectToolButton->setEnabled(controlsEnabled);
     m_drawToolButton->setEnabled(controlsEnabled);
     m_shapeToolButton->setEnabled(controlsEnabled);
+    m_arrowToolButton->setEnabled(controlsEnabled);
+    m_rectangleToolButton->setEnabled(controlsEnabled);
+    m_ellipseToolButton->setEnabled(controlsEnabled);
     m_textButton->setEnabled(controlsEnabled && !m_modeFrame.isNull());
+    m_myCallVariableButton->setEnabled(controlsEnabled && !m_modeFrame.isNull());
+    m_toCallVariableButton->setEnabled(controlsEnabled && !m_modeFrame.isNull());
     m_colorButton->setEnabled(controlsEnabled);
+    m_fillColorButton->setEnabled(controlsEnabled);
     m_fontCombo->setEnabled(controlsEnabled);
     m_textSizeSlider->setEnabled(controlsEnabled);
     m_resetCompositionButton->setEnabled(controlsEnabled);
-    m_deleteObjectButton->setEnabled(controlsEnabled && m_composer->hasSelectedText());
+    m_deleteObjectButton->setEnabled(controlsEnabled && m_composer->hasSelectedObject());
+    m_rotateObjectLeftButton->setEnabled(controlsEnabled && m_composer->hasSelectedObject());
+    m_rotateObjectRightButton->setEnabled(controlsEnabled && m_composer->hasSelectedObject());
     m_templateCombo->setEnabled(controlsEnabled);
     m_applyTemplateButton->setEnabled(controlsEnabled && !m_modeFrame.isNull());
     m_saveTemplateButton->setEnabled(controlsEnabled && !m_modeFrame.isNull());
@@ -2158,14 +2288,23 @@ void SstvScreen::addOrEditText() {
                                           editing ? QStringLiteral("Edit SSTV text")
                                                   : QStringLiteral("Add SSTV text"),
                                           QStringLiteral("Text to transmit:"),
-                                          initialText, true, &accepted);
+                                          initialText, true, &accepted, true);
     if (!accepted || text.trimmed().isEmpty())
         return;
     const QFont font = composerFontFromControls();
     if (editing)
-        m_composer->updateSelectedText(text, font, m_composerColor);
+        m_composer->updateSelectedText(text, font, m_composerFillColor);
     else
-        m_composer->addTextBlock(text, font, m_composerColor);
+        m_composer->addTextBlock(text, font, m_composerFillColor);
+}
+
+void SstvScreen::addVariableText(const QString &token) {
+    if (m_transmitting || !m_composer->hasBackground())
+        return;
+    m_composer->addTextBlock(token, composerFontFromControls(), m_composerFillColor);
+    m_composer->setTool(SstvComposerCanvas::Tool::Select);
+    syncTextControlsFromSelection();
+    updateComposerControls();
 }
 
 QFont SstvScreen::composerFontFromControls() const {
@@ -2181,7 +2320,37 @@ QFont SstvScreen::composerFontFromControls() const {
 }
 
 void SstvScreen::syncTextControlsFromSelection() {
-    if (!m_composer || !m_composer->hasSelectedText() || !m_fontCombo || !m_textSizeSlider)
+    if (!m_composer || !m_fontCombo || !m_textSizeSlider)
+        return;
+    if (m_composer->hasSelectedObject()) {
+        const QColor selectedOutline = m_composer->selectedOutlineColor();
+        if (selectedOutline.isValid()) {
+            m_composerColor = selectedOutline;
+            m_colorButton->setIcon(sstvGlyph(SstvGlyph::Color, m_composerColor));
+            m_colorButton->setToolTip(
+                m_composerColor.alpha() == 0
+                    ? QStringLiteral("Object outline: NO OUTLINE")
+                    : QStringLiteral("Object outline: %1")
+                          .arg(m_composerColor.name().toUpper()));
+        }
+        if (m_composer->selectedObjectSupportsFill()) {
+            m_composerFillColor = m_composer->selectedFillColor();
+            m_fillColorButton->setIcon(
+                sstvGlyph(SstvGlyph::Color, m_composerFillColor));
+            m_fillColorButton->setToolTip(
+                m_composerFillColor.alpha() == 0
+                    ? QStringLiteral("Object fill / line color: TRANSPARENT")
+                    : QStringLiteral("Object fill / line color: %1")
+                          .arg(m_composerFillColor.name().toUpper()));
+        }
+        const int selectedSize = m_composer->selectedSize();
+        if (selectedSize > 0) {
+            const QSignalBlocker sizeBlocker(m_textSizeSlider);
+            m_textSizeSlider->setValue(qBound(m_textSizeSlider->minimum(), selectedSize,
+                                              m_textSizeSlider->maximum()));
+        }
+    }
+    if (!m_composer->hasSelectedText())
         return;
     const QFont selected = m_composer->selectedTextFont();
     int familyMatch = -1;
@@ -2202,31 +2371,40 @@ void SstvScreen::syncTextControlsFromSelection() {
         }
     }
     const QSignalBlocker fontBlocker(m_fontCombo);
-    const QSignalBlocker sizeBlocker(m_textSizeSlider);
     if (exactMatch >= 0 || familyMatch >= 0)
         m_fontCombo->setCurrentIndex(exactMatch >= 0 ? exactMatch : familyMatch);
-    if (selected.pixelSize() > 0)
-        m_textSizeSlider->setValue(qBound(m_textSizeSlider->minimum(), selected.pixelSize(),
-                                          m_textSizeSlider->maximum()));
-    const QColor selectedColor = m_composer->selectedTextColor();
-    if (selectedColor.isValid()) {
-        m_composerColor = selectedColor;
-        m_colorButton->setIcon(sstvGlyph(SstvGlyph::Color, m_composerColor));
-        m_colorButton->setToolTip(
-            QStringLiteral("Markup color: %1").arg(m_composerColor.name().toUpper()));
-    }
 }
 
 void SstvScreen::chooseInkColor() {
-    const QColor selected = promptSstvMarkupColor(this, m_composerColor);
+    const QColor selected = promptSstvMarkupColor(
+        this, m_composerColor, QStringLiteral("OBJECT OUTLINE COLOR"), true);
     if (!selected.isValid())
         return;
 
     m_composerColor = selected;
     m_composer->setInk(m_composerColor, qMax(2, m_textSizeSlider->value() / 5));
-    m_composer->updateSelectedTextColor(m_composerColor);
+    m_composer->updateSelectedOutlineColor(m_composerColor);
     m_colorButton->setIcon(sstvGlyph(SstvGlyph::Color, m_composerColor));
-    m_colorButton->setToolTip(QStringLiteral("Markup color: %1").arg(m_composerColor.name().toUpper()));
+    m_colorButton->setToolTip(
+        m_composerColor.alpha() == 0
+            ? QStringLiteral("Object outline: NO OUTLINE")
+            : QStringLiteral("Object outline: %1")
+                  .arg(m_composerColor.name().toUpper()));
+}
+
+void SstvScreen::chooseFillColor() {
+    const QColor selected = promptSstvMarkupColor(
+        this, m_composerFillColor, QStringLiteral("FILL / LINE COLOR"), true);
+    if (!selected.isValid())
+        return;
+    m_composerFillColor = selected;
+    m_composer->setFillColor(selected);
+    m_composer->updateSelectedFillColor(selected);
+    m_fillColorButton->setIcon(sstvGlyph(SstvGlyph::Color, selected));
+    m_fillColorButton->setToolTip(
+        selected.alpha() == 0 ? QStringLiteral("Object fill / line color: TRANSPARENT")
+                              : QStringLiteral("Object fill / line color: %1")
+                                    .arg(selected.name().toUpper()));
 }
 
 void SstvScreen::refreshTemplates(const QString &selectName) {
@@ -2267,27 +2445,17 @@ void SstvScreen::applySelectedTemplate() {
             return;
         }
     } else {
-        if (m_operatorCallsign.isEmpty()) {
-            m_txStateLabel->setText(QStringLiteral("SET MY CALL BEFORE USING A BUILT-IN TEMPLATE"));
-            m_callsignEdit->setFocus();
-            return;
-        }
         m_composer->restoreCompositionState(QJsonObject());
         QFont font(QStringLiteral("Sans Serif"));
         font.setPixelSize(qMax(24, m_composer->renderedImage().width() / 10));
         font.setBold(true);
         QString text;
         if (key == QStringLiteral("builtin:cq"))
-            text = QStringLiteral("CQ CQ CQ\nDE %1").arg(m_operatorCallsign);
-        else if (key == QStringLiteral("builtin:report")) {
-            text = m_replyCallsign.isEmpty()
-                ? QStringLiteral("DE %1\nRST 595").arg(m_operatorCallsign)
-                : QStringLiteral("%1\nDE %2\nRST 595").arg(m_replyCallsign, m_operatorCallsign);
-        } else {
-            text = m_replyCallsign.isEmpty()
-                ? QStringLiteral("73\n%1").arg(m_operatorCallsign)
-                : QStringLiteral("73 %1\nDE %2").arg(m_replyCallsign, m_operatorCallsign);
-        }
+            text = QStringLiteral("CQ CQ CQ\nDE {MY_CALL}");
+        else if (key == QStringLiteral("builtin:report"))
+            text = QStringLiteral("{TO_CALL}\nDE {MY_CALL}\nRST 595");
+        else
+            text = QStringLiteral("73 {TO_CALL}\nDE {MY_CALL}");
         m_composer->addTextBlock(text, font, Qt::white, QPointF(0.5, 0.5));
     }
     m_editingTemplateName.clear();
@@ -2336,12 +2504,6 @@ void SstvScreen::editSelectedTemplate() {
         m_txStateLabel->setText(QStringLiteral("TEMPLATE EDIT FAILED • %1").arg(error));
         return;
     }
-    if (!userTemplate && m_operatorCallsign.isEmpty()) {
-        m_txStateLabel->setText(QStringLiteral("SET MY CALL BEFORE EDITING A BUILT-IN TEMPLATE"));
-        m_callsignEdit->setFocus();
-        return;
-    }
-
     InWindowDialog dialog(this);
     QWidget *panel = dialog.contentWidget();
     auto *layout = new QVBoxLayout(panel);
@@ -2363,10 +2525,15 @@ void SstvScreen::editSelectedTemplate() {
     hint->setStyleSheet(QStringLiteral("color: #cbd3d6; font-size: 9px;"));
     layout->addWidget(hint);
 
-    auto *editor = new SstvComposerCanvas(panel);
-    editor->setMinimumSize(220, 120);
+    auto *workspaceWidget = new QWidget(panel);
+    auto *workspaceLayout = new QBoxLayout(QBoxLayout::TopToBottom, workspaceWidget);
+    workspaceLayout->setContentsMargins(0, 0, 0, 0);
+    workspaceLayout->setSpacing(8);
+    auto *editor = new SstvComposerCanvas(workspaceWidget);
+    editor->setMinimumSize(220, 100);
     editor->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
     editor->setBackground(m_modeFrame);
+    editor->setCallsignValues(m_operatorCallsign, m_replyCallsign);
     if (userTemplate && !editor->restoreCompositionState(
             state.value(QStringLiteral("composition")).toObject())) {
         m_txStateLabel->setText(QStringLiteral("TEMPLATE EDIT FAILED • INVALID TEMPLATE DATA"));
@@ -2378,35 +2545,45 @@ void SstvScreen::editSelectedTemplate() {
         font.setBold(true);
         QString text;
         if (key == QStringLiteral("builtin:cq"))
-            text = QStringLiteral("CQ CQ CQ\nDE %1").arg(m_operatorCallsign);
-        else if (key == QStringLiteral("builtin:report")) {
-            text = m_replyCallsign.isEmpty()
-                ? QStringLiteral("DE %1\nRST 595").arg(m_operatorCallsign)
-                : QStringLiteral("%1\nDE %2\nRST 595").arg(m_replyCallsign,
-                                                             m_operatorCallsign);
-        } else {
-            text = m_replyCallsign.isEmpty()
-                ? QStringLiteral("73\n%1").arg(m_operatorCallsign)
-                : QStringLiteral("73 %1\nDE %2").arg(m_replyCallsign,
-                                                       m_operatorCallsign);
-        }
+            text = QStringLiteral("CQ CQ CQ\nDE {MY_CALL}");
+        else if (key == QStringLiteral("builtin:report"))
+            text = QStringLiteral("{TO_CALL}\nDE {MY_CALL}\nRST 595");
+        else
+            text = QStringLiteral("73 {TO_CALL}\nDE {MY_CALL}");
         editor->addTextBlock(text, font, Qt::white, QPointF(0.5, 0.5));
     }
-    layout->addWidget(editor, 1);
+    workspaceLayout->addWidget(editor, 1);
+    auto *controlPanel = new QWidget(workspaceWidget);
+    auto *controlLayout = new QVBoxLayout(controlPanel);
+    controlLayout->setContentsMargins(0, 0, 0, 0);
+    controlLayout->setSpacing(5);
+    workspaceLayout->addWidget(controlPanel);
+    layout->addWidget(workspaceWidget, 1);
 
-    QColor editorColor = Qt::white;
-    int editorShapeIndex = 0;
+    QColor editorColor = Qt::black;
+    QColor editorFillColor = Qt::white;
     auto *moveButton = new QPushButton(QStringLiteral("MOVE"), panel);
     auto *drawButton = new QPushButton(QStringLiteral("DRAW"), panel);
     auto *shapeButton = new QPushButton(QStringLiteral("LINE"), panel);
+    auto *arrowButton = new QPushButton(panel);
+    auto *rectangleButton = new QPushButton(panel);
+    auto *ellipseButton = new QPushButton(panel);
     auto *textButton = new QPushButton(QStringLiteral("ADD TEXT"), panel);
+    auto *myCallButton = new QPushButton(QStringLiteral("MY CALL"), panel);
+    auto *toCallButton = new QPushButton(QStringLiteral("TO CALL"), panel);
     auto *colorButton = new QPushButton(panel);
+    auto *fillColorButton = new QPushButton(panel);
     auto *deleteButton = new QPushButton(QStringLiteral("DELETE"), panel);
     auto *rotateLeftButton = new QPushButton(panel);
     auto *rotateRightButton = new QPushButton(panel);
+    auto *undoButton = new QPushButton(panel);
+    auto *redoButton = new QPushButton(panel);
     auto *resetButton = new QPushButton(QStringLiteral("RESET"), panel);
-    for (QPushButton *button : {moveButton, drawButton, shapeButton, textButton, colorButton,
-                                deleteButton, rotateLeftButton, rotateRightButton, resetButton}) {
+    for (QPushButton *button : {moveButton, drawButton, shapeButton, arrowButton,
+                                rectangleButton, ellipseButton, textButton, myCallButton,
+                                toCallButton, colorButton, fillColorButton, deleteButton,
+                                rotateLeftButton, rotateRightButton, undoButton, redoButton,
+                                resetButton}) {
         QFont compactFont = button->font();
         compactFont.setPixelSize(10);
         button->setFont(compactFont);
@@ -2417,53 +2594,89 @@ void SstvScreen::editSelectedTemplate() {
     moveButton->setIcon(sstvGlyph(SstvGlyph::Move));
     drawButton->setIcon(sstvGlyph(SstvGlyph::Draw));
     shapeButton->setIcon(sstvGlyph(SstvGlyph::Line));
+    arrowButton->setIcon(sstvGlyph(SstvGlyph::Arrow));
+    rectangleButton->setIcon(sstvGlyph(SstvGlyph::Rectangle));
+    ellipseButton->setIcon(sstvGlyph(SstvGlyph::Ellipse));
     colorButton->setIcon(sstvGlyph(SstvGlyph::Color, editorColor));
+    fillColorButton->setIcon(sstvGlyph(SstvGlyph::Color, editorFillColor));
     deleteButton->setIcon(sstvGlyph(SstvGlyph::Trash));
     rotateLeftButton->setIcon(sstvGlyph(SstvGlyph::RotateLeft));
     rotateRightButton->setIcon(sstvGlyph(SstvGlyph::RotateRight));
-    for (QPushButton *button : {moveButton, drawButton, shapeButton, colorButton, deleteButton,
-                                rotateLeftButton, rotateRightButton}) {
+    undoButton->setIcon(sstvGlyph(SstvGlyph::Undo));
+    redoButton->setIcon(sstvGlyph(SstvGlyph::Redo));
+    for (QPushButton *button : {moveButton, drawButton, shapeButton, arrowButton,
+                                rectangleButton, ellipseButton, colorButton, fillColorButton,
+                                deleteButton, rotateLeftButton, rotateRightButton,
+                                undoButton, redoButton}) {
         button->setText(QString());
         button->setFixedSize(26, 26);
         button->setIconSize(QSize(10, 10));
     }
     moveButton->setToolTip(QStringLiteral("Move or select an object"));
     drawButton->setToolTip(QStringLiteral("Draw freehand"));
-    shapeButton->setToolTip(QStringLiteral("Draw line; tap again for the next shape"));
-    colorButton->setToolTip(QStringLiteral("Choose markup color"));
-    colorButton->setAccessibleName(QStringLiteral("Choose markup color"));
-    deleteButton->setToolTip(QStringLiteral("Delete selected text"));
-    rotateLeftButton->setToolTip(QStringLiteral("Rotate image left"));
-    rotateRightButton->setToolTip(QStringLiteral("Rotate image right"));
-    rotateLeftButton->setAccessibleName(QStringLiteral("Rotate image left"));
-    rotateRightButton->setAccessibleName(QStringLiteral("Rotate image right"));
+    shapeButton->setToolTip(QStringLiteral("Draw line"));
+    arrowButton->setToolTip(QStringLiteral("Draw arrow"));
+    rectangleButton->setToolTip(QStringLiteral("Draw rectangle"));
+    ellipseButton->setToolTip(QStringLiteral("Draw ellipse"));
+    colorButton->setToolTip(QStringLiteral("Choose the thin object outline color"));
+    fillColorButton->setToolTip(
+        QStringLiteral("Choose text/line color or rectangle/ellipse fill color"));
+    deleteButton->setToolTip(QStringLiteral("Delete selected object"));
+    rotateLeftButton->setToolTip(QStringLiteral("Rotate selected object left 45 degrees"));
+    rotateRightButton->setToolTip(QStringLiteral("Rotate selected object right 45 degrees"));
+    undoButton->setToolTip(QStringLiteral("Undo last edit"));
+    redoButton->setToolTip(QStringLiteral("Redo last edit"));
     textButton->setFixedWidth(78);
-    resetButton->setFixedWidth(58);
+    myCallButton->setFixedWidth(56);
+    toCallButton->setFixedWidth(56);
+    resetButton->setFixedWidth(56);
 
     auto *toolWidget = new QWidget(panel);
-    auto *toolGrid = new QGridLayout(toolWidget);
-    toolGrid->setContentsMargins(0, 0, 0, 0);
-    toolGrid->setHorizontalSpacing(4);
-    toolGrid->setVerticalSpacing(3);
-    toolGrid->setAlignment(Qt::AlignHCenter);
-    const QList<QPushButton *> editorToolButtons{
-        moveButton, drawButton, shapeButton, textButton, colorButton,
-        deleteButton, rotateLeftButton, rotateRightButton, resetButton
-    };
-    const auto clearGrid = [](QGridLayout *grid) {
-        while (QLayoutItem *item = grid->takeAt(0))
-            delete item;
-    };
-    const auto reflowToolGrid = [toolGrid, editorToolButtons, clearGrid](bool narrow) {
-        clearGrid(toolGrid);
-        const int columns = narrow ? 5 : editorToolButtons.size();
-        for (int index = 0; index < editorToolButtons.size(); ++index)
-            toolGrid->addWidget(editorToolButtons.at(index), index / columns, index % columns,
-                                Qt::AlignCenter);
-        toolGrid->invalidate();
-        toolGrid->activate();
-    };
-    layout->addWidget(toolWidget);
+    auto *toolRows = new QVBoxLayout(toolWidget);
+    toolRows->setContentsMargins(0, 0, 0, 0);
+    toolRows->setSpacing(3);
+
+    auto *drawingRow = new QHBoxLayout;
+    drawingRow->setSpacing(4);
+    drawingRow->addStretch(1);
+    for (QPushButton *button : {moveButton, drawButton, shapeButton, arrowButton,
+                                rectangleButton, ellipseButton, colorButton, fillColorButton})
+        drawingRow->addWidget(button);
+    drawingRow->addStretch(1);
+    toolRows->addLayout(drawingRow);
+
+    auto *editRow = new QHBoxLayout;
+    editRow->setSpacing(4);
+    editRow->addStretch(1);
+    // Match the visual ordering used by mobile editors: clockwise/right first,
+    // then counterclockwise/left. Keep every related pair adjacent.
+    editRow->addWidget(rotateRightButton);
+    editRow->addWidget(rotateLeftButton);
+    editRow->addSpacing(5);
+    editRow->addWidget(undoButton);
+    editRow->addWidget(redoButton);
+    editRow->addWidget(deleteButton);
+    editRow->addStretch(1);
+    toolRows->addLayout(editRow);
+
+    auto *objectRow = new QHBoxLayout;
+    objectRow->setSpacing(4);
+    // Portrait has enough width to balance RESET with an equal left spacer,
+    // keeping the three text actions centered over the whole row. The compact
+    // landscape side panel removes this spacer so fixed-width buttons cannot
+    // collide.
+    auto *objectRowBalance = new QSpacerItem(resetButton->width() + objectRow->spacing(), 0,
+                                             QSizePolicy::Fixed, QSizePolicy::Minimum);
+    objectRow->addItem(objectRowBalance);
+    objectRow->addStretch(1);
+    objectRow->addWidget(textButton);
+    objectRow->addWidget(myCallButton);
+    objectRow->addWidget(toCallButton);
+    objectRow->addStretch(1);
+    objectRow->addWidget(resetButton);
+    toolRows->addLayout(objectRow);
+    toolWidget->setFixedHeight(88);
+    controlLayout->addWidget(toolWidget);
 
     int editorFontIndex = qMax(0, m_fontCombo->currentIndex());
     auto *fontButton = new QPushButton(m_fontCombo->itemText(editorFontIndex), panel);
@@ -2477,8 +2690,8 @@ void SstvScreen::editSelectedTemplate() {
         "border-radius: 5px; padding: 4px 7px; text-align: left; font-size: 10px; }"
         "QPushButton:pressed { border-color: #6dd4ef; }"));
     auto *sizeSlider = new QSlider(Qt::Horizontal, panel);
-    sizeSlider->setRange(12, 56);
-    sizeSlider->setValue(28);
+    sizeSlider->setRange(SstvTextSizeMinimumPx, SstvTextSizeMaximumPx);
+    sizeSlider->setValue(SstvTextSizeDefaultPx);
     sizeSlider->setMinimumHeight(26);
     sizeSlider->setStyleSheet(
         K4Styles::sliderHorizontal(K4Styles::Colors::DarkBackground,
@@ -2516,6 +2729,10 @@ void SstvScreen::editSelectedTemplate() {
     auto *sizeCaption = new QLabel(QStringLiteral("SIZE"), panel);
     for (QLabel *label : {fontLabel, sizeCaption})
         label->setStyleSheet(QStringLiteral("font-size: 9px; color: #f0f0f0;"));
+    const auto clearGrid = [](QGridLayout *grid) {
+        while (QLayoutItem *item = grid->takeAt(0))
+            delete item;
+    };
     const auto reflowFormatGrid = [formatGrid, clearGrid, fontLabel, fontButton,
                                    sizeCaption, sizeSlider, sizeLabel](bool) {
         clearGrid(formatGrid);
@@ -2530,7 +2747,7 @@ void SstvScreen::editSelectedTemplate() {
         formatGrid->invalidate();
         formatGrid->activate();
     };
-    layout->addWidget(formatWidget);
+    controlLayout->addWidget(formatWidget);
 
     auto *zoomRow = new QHBoxLayout;
     zoomRow->setSpacing(5);
@@ -2557,7 +2774,8 @@ void SstvScreen::editSelectedTemplate() {
     zoomRow->addWidget(editorZoomSlider, 1);
     zoomRow->addWidget(editorZoomLabel);
     zoomRow->addWidget(centerButton);
-    layout->addLayout(zoomRow);
+    controlLayout->addLayout(zoomRow);
+    controlLayout->addStretch(1);
 
     const auto syncEditorFraming = [this, editor, editorZoomSlider, editorZoomLabel]() {
         const QSignalBlocker blocker(editorZoomSlider);
@@ -2593,26 +2811,24 @@ void SstvScreen::editSelectedTemplate() {
     connect(drawButton, &QPushButton::clicked, editor, [editor]() {
         editor->setTool(SstvComposerCanvas::Tool::Draw);
     });
-    connect(shapeButton, &QPushButton::clicked, editor,
-            [editor, shapeButton, &editorShapeIndex]() {
-        static const QStringList labels{QStringLiteral("LINE"), QStringLiteral("ARROW"),
-                                        QStringLiteral("RECT"), QStringLiteral("ELLIPSE")};
-        static const QVector<SstvGlyph> glyphs{SstvGlyph::Line, SstvGlyph::Arrow,
-                                               SstvGlyph::Rectangle, SstvGlyph::Ellipse};
-        if (editor->tool() == SstvComposerCanvas::Tool::Shape)
-            editorShapeIndex = (editorShapeIndex + 1) % labels.size();
-        editor->setShapeType(
-            static_cast<SstvComposerCanvas::ShapeType>(editorShapeIndex));
+    const auto activateEditorShape = [editor](SstvComposerCanvas::ShapeType type) {
+        editor->setShapeType(type);
         editor->setTool(SstvComposerCanvas::Tool::Shape);
-        shapeButton->setText(labels.at(editorShapeIndex));
-        shapeButton->setIcon(sstvGlyph(glyphs.at(editorShapeIndex)));
-        shapeButton->setText(QString());
-        shapeButton->setToolTip(QStringLiteral("Draw %1; tap again for the next shape")
-                                    .arg(labels.at(editorShapeIndex).toLower()));
-        shapeButton->setIconSize(QSize(10, 10));
+    };
+    connect(shapeButton, &QPushButton::clicked, editor, [activateEditorShape]() {
+        activateEditorShape(SstvComposerCanvas::ShapeType::Line);
+    });
+    connect(arrowButton, &QPushButton::clicked, editor, [activateEditorShape]() {
+        activateEditorShape(SstvComposerCanvas::ShapeType::Arrow);
+    });
+    connect(rectangleButton, &QPushButton::clicked, editor, [activateEditorShape]() {
+        activateEditorShape(SstvComposerCanvas::ShapeType::Rectangle);
+    });
+    connect(ellipseButton, &QPushButton::clicked, editor, [activateEditorShape]() {
+        activateEditorShape(SstvComposerCanvas::ShapeType::Ellipse);
     });
     connect(textButton, &QPushButton::clicked, this,
-            [this, editor, &editorColor, fontFromEditorControls]() {
+            [this, editor, &editorFillColor, fontFromEditorControls]() {
         bool accepted = false;
         const bool editing = editor->hasSelectedText();
         const QString initial = editing ? editor->selectedText()
@@ -2621,24 +2837,34 @@ void SstvScreen::editSelectedTemplate() {
         const QString text = promptSstvTxText(
             this, editing ? QStringLiteral("Edit template text")
                           : QStringLiteral("Add template text"),
-            QStringLiteral("Text to transmit:"), initial, true, &accepted);
+            QStringLiteral("Text to transmit:"), initial, true, &accepted, true);
         if (!accepted || text.trimmed().isEmpty())
             return;
         if (editing)
-            editor->updateSelectedText(text, fontFromEditorControls(), editorColor);
+            editor->updateSelectedText(text, fontFromEditorControls(), editorFillColor);
         else
-            editor->addTextBlock(text, fontFromEditorControls(), editorColor);
+            editor->addTextBlock(text, fontFromEditorControls(), editorFillColor);
+    });
+    connect(myCallButton, &QPushButton::clicked, editor,
+            [editor, &editorFillColor, fontFromEditorControls]() {
+        editor->addTextBlock(SstvComposerCanvas::myCallToken(),
+                             fontFromEditorControls(), editorFillColor);
+        editor->setTool(SstvComposerCanvas::Tool::Select);
+    });
+    connect(toCallButton, &QPushButton::clicked, editor,
+            [editor, &editorFillColor, fontFromEditorControls]() {
+        editor->addTextBlock(SstvComposerCanvas::toCallToken(),
+                             fontFromEditorControls(), editorFillColor);
+        editor->setTool(SstvComposerCanvas::Tool::Select);
     });
     connect(deleteButton, &QPushButton::clicked, editor,
-            &SstvComposerCanvas::deleteSelectedText);
-    connect(rotateLeftButton, &QPushButton::clicked, this, [this, syncEditorFraming]() {
-        rotateSource(-90);
-        syncEditorFraming();
-    });
-    connect(rotateRightButton, &QPushButton::clicked, this, [this, syncEditorFraming]() {
-        rotateSource(90);
-        syncEditorFraming();
-    });
+            &SstvComposerCanvas::deleteSelectedObject);
+    connect(rotateLeftButton, &QPushButton::clicked, editor,
+            [editor]() { editor->rotateSelectedObject(-45); });
+    connect(rotateRightButton, &QPushButton::clicked, editor,
+            [editor]() { editor->rotateSelectedObject(45); });
+    connect(undoButton, &QPushButton::clicked, editor, &SstvComposerCanvas::undo);
+    connect(redoButton, &QPushButton::clicked, editor, &SstvComposerCanvas::redo);
     connect(resetButton, &QPushButton::clicked, editor,
             &SstvComposerCanvas::resetComposition);
     connect(fontButton, &QPushButton::clicked, this,
@@ -2651,30 +2877,80 @@ void SstvScreen::editSelectedTemplate() {
         editor->updateSelectedTextFont(fontFromEditorControls());
     });
     connect(sizeSlider, &QSlider::valueChanged, editor,
-            [editor, sizeLabel, &editorColor, fontFromEditorControls](int value) {
+            [editor, sizeLabel, &editorColor](int value) {
         sizeLabel->setText(QStringLiteral("%1 PX").arg(value));
         editor->setInk(editorColor, qMax(2, value / 5));
-        editor->updateSelectedTextFont(fontFromEditorControls());
+        editor->updateSelectedSize(value);
     });
     connect(colorButton, &QPushButton::clicked, this,
             [this, editor, colorButton, &editorColor, sizeSlider]() {
-        const QColor selected = promptSstvMarkupColor(this, editorColor);
+        const QColor selected = promptSstvMarkupColor(
+            this, editorColor, QStringLiteral("OBJECT OUTLINE COLOR"), true);
         if (!selected.isValid())
             return;
         editorColor = selected;
         editor->setInk(editorColor, qMax(2, sizeSlider->value() / 5));
-        editor->updateSelectedTextColor(editorColor);
+        editor->updateSelectedOutlineColor(editorColor);
         colorButton->setIcon(sstvGlyph(SstvGlyph::Color, editorColor));
         colorButton->setToolTip(
-            QStringLiteral("Markup color: %1").arg(editorColor.name().toUpper()));
+            editorColor.alpha() == 0
+                ? QStringLiteral("Object outline: NO OUTLINE")
+                : QStringLiteral("Object outline: %1")
+                      .arg(editorColor.name().toUpper()));
+    });
+    connect(fillColorButton, &QPushButton::clicked, this,
+            [this, editor, fillColorButton, &editorFillColor]() {
+        const QColor selected = promptSstvMarkupColor(
+            this, editorFillColor, QStringLiteral("FILL / LINE COLOR"), true);
+        if (!selected.isValid())
+            return;
+        editorFillColor = selected;
+        editor->setFillColor(selected);
+        editor->updateSelectedFillColor(selected);
+        fillColorButton->setIcon(sstvGlyph(SstvGlyph::Color, selected));
+        fillColorButton->setToolTip(
+            selected.alpha() == 0 ? QStringLiteral("Object fill / line color: TRANSPARENT")
+                                  : QStringLiteral("Object fill / line color: %1")
+                                        .arg(selected.name().toUpper()));
     });
     connect(editor, &SstvComposerCanvas::selectionChanged, panel,
-            [this, editor, fontButton, sizeSlider, sizeLabel, colorButton, textButton,
-             deleteButton, &editorFontIndex, &editorColor](bool selected) {
-        textButton->setText(selected ? QStringLiteral("EDIT TEXT")
-                                     : QStringLiteral("ADD TEXT"));
+            [this, editor, fontButton, sizeSlider, sizeLabel, colorButton, fillColorButton,
+             textButton, deleteButton, rotateLeftButton, rotateRightButton,
+             &editorFontIndex, &editorColor, &editorFillColor](bool selected) {
+        textButton->setText(editor->hasSelectedText() ? QStringLiteral("EDIT TEXT")
+                                                      : QStringLiteral("ADD TEXT"));
         deleteButton->setEnabled(selected);
+        rotateLeftButton->setEnabled(selected);
+        rotateRightButton->setEnabled(selected);
         if (!selected)
+            return;
+        const QColor selectedOutline = editor->selectedOutlineColor();
+        if (selectedOutline.isValid()) {
+            editorColor = selectedOutline;
+            colorButton->setIcon(sstvGlyph(SstvGlyph::Color, editorColor));
+            colorButton->setToolTip(
+                editorColor.alpha() == 0
+                    ? QStringLiteral("Object outline: NO OUTLINE")
+                    : QStringLiteral("Object outline: %1")
+                          .arg(editorColor.name().toUpper()));
+        }
+        if (editor->selectedObjectSupportsFill()) {
+            editorFillColor = editor->selectedFillColor();
+            fillColorButton->setIcon(sstvGlyph(SstvGlyph::Color, editorFillColor));
+            fillColorButton->setToolTip(
+                editorFillColor.alpha() == 0
+                    ? QStringLiteral("Object fill / line color: TRANSPARENT")
+                    : QStringLiteral("Object fill / line color: %1")
+                          .arg(editorFillColor.name().toUpper()));
+        }
+        const int selectedSize = editor->selectedSize();
+        if (selectedSize > 0) {
+            const QSignalBlocker blocker(sizeSlider);
+            sizeSlider->setValue(qBound(sizeSlider->minimum(), selectedSize,
+                                        sizeSlider->maximum()));
+            sizeLabel->setText(QStringLiteral("%1 PX").arg(sizeSlider->value()));
+        }
+        if (!editor->hasSelectedText())
             return;
         const QFont font = editor->selectedTextFont();
         for (int index = 0; index < m_fontCombo->count(); ++index) {
@@ -2689,22 +2965,18 @@ void SstvScreen::editSelectedTemplate() {
                 break;
             }
         }
-        if (font.pixelSize() > 0) {
-            const QSignalBlocker blocker(sizeSlider);
-            sizeSlider->setValue(qBound(sizeSlider->minimum(), font.pixelSize(),
-                                        sizeSlider->maximum()));
-            sizeLabel->setText(QStringLiteral("%1 PX").arg(sizeSlider->value()));
-        }
-        const QColor selectedColor = editor->selectedTextColor();
-        if (selectedColor.isValid()) {
-            editorColor = selectedColor;
-            colorButton->setIcon(sstvGlyph(SstvGlyph::Color, editorColor));
-            colorButton->setToolTip(
-                QStringLiteral("Markup color: %1").arg(editorColor.name().toUpper()));
-        }
     });
     deleteButton->setEnabled(false);
+    rotateLeftButton->setEnabled(false);
+    rotateRightButton->setEnabled(false);
+    const auto updateEditorHistory = [editor, undoButton, redoButton]() {
+        undoButton->setEnabled(editor->canUndo());
+        redoButton->setEnabled(editor->canRedo());
+    };
+    connect(editor, &SstvComposerCanvas::compositionChanged, panel, updateEditorHistory);
+    updateEditorHistory();
     editor->setInk(editorColor, qMax(2, sizeSlider->value() / 5));
+    editor->setFillColor(editorFillColor);
 
     auto *dialogButtons = new QHBoxLayout;
     dialogButtons->setSpacing(10);
@@ -2731,13 +3003,28 @@ void SstvScreen::editSelectedTemplate() {
     dialogButtons->addWidget(saveButton);
     layout->addLayout(dialogButtons);
 
-    const auto reflowEditor = [editor, reflowToolGrid, reflowFormatGrid](const QSize &size) {
-        const bool narrow = size.width() < 520;
-        reflowToolGrid(narrow);
-        reflowFormatGrid(narrow);
-        editor->setMinimumHeight(narrow ? 180 : 110);
-        editor->setMaximumHeight(narrow ? QWIDGETSIZE_MAX : 180);
+    const auto reflowEditor = [editor, controlPanel, workspaceLayout, objectRow,
+                               objectRowBalance, resetButton,
+                               reflowFormatGrid](const QSize &size) {
+        const bool landscape = size.width() > size.height();
+        reflowFormatGrid(!landscape);
+        workspaceLayout->setDirection(landscape ? QBoxLayout::LeftToRight
+                                                : QBoxLayout::TopToBottom);
+        workspaceLayout->setStretch(0, landscape ? 3 : 1);
+        workspaceLayout->setStretch(1, landscape ? 2 : 0);
+        controlPanel->setMinimumWidth(landscape ? 300 : 0);
+        controlPanel->setMaximumWidth(landscape ? 390 : QWIDGETSIZE_MAX);
+        controlPanel->setSizePolicy(landscape ? QSizePolicy::Preferred
+                                              : QSizePolicy::Expanding,
+                                    QSizePolicy::Preferred);
+        objectRowBalance->changeSize(landscape ? 0
+                                              : resetButton->width() + objectRow->spacing(),
+                                     0, QSizePolicy::Fixed, QSizePolicy::Minimum);
+        objectRow->invalidate();
+        editor->setMinimumHeight(landscape ? 150 : 180);
+        editor->setMaximumHeight(QWIDGETSIZE_MAX);
         editor->updateGeometry();
+        controlPanel->updateGeometry();
     };
     connect(&dialog, &InWindowDialog::panelResized, panel, reflowEditor);
 
@@ -3171,13 +3458,24 @@ void SstvScreen::updateComposerControls() {
                                                    m_composer->tool() == SstvComposerCanvas::Tool::Select));
     m_drawToolButton->setStyleSheet(buttonStyle(QStringLiteral("#6dd4ef"),
                                                  m_composer->tool() == SstvComposerCanvas::Tool::Draw));
-    m_shapeToolButton->setStyleSheet(buttonStyle(QStringLiteral("#6dd4ef"),
-                                                  m_composer->tool() == SstvComposerCanvas::Tool::Shape));
+    const bool shapeTool = m_composer->tool() == SstvComposerCanvas::Tool::Shape;
+    const auto shapeStyle = [this, shapeTool](QPushButton *button,
+                                              SstvComposerCanvas::ShapeType type) {
+        button->setStyleSheet(buttonStyle(QStringLiteral("#6dd4ef"),
+                                          shapeTool && m_composer->shapeType() == type));
+    };
+    shapeStyle(m_shapeToolButton, SstvComposerCanvas::ShapeType::Line);
+    shapeStyle(m_arrowToolButton, SstvComposerCanvas::ShapeType::Arrow);
+    shapeStyle(m_rectangleToolButton, SstvComposerCanvas::ShapeType::Rectangle);
+    shapeStyle(m_ellipseToolButton, SstvComposerCanvas::ShapeType::Ellipse);
     m_undoButton->setEnabled(enabled && m_composer->canUndo());
     m_redoButton->setEnabled(enabled && m_composer->canRedo());
     m_textButton->setText(m_composer->hasSelectedText() ? QStringLiteral("EDIT TEXT")
                                                         : QStringLiteral("ADD TEXT"));
-    m_deleteObjectButton->setEnabled(enabled && m_composer->hasSelectedText());
+    const bool selected = m_composer->hasSelectedObject();
+    m_deleteObjectButton->setEnabled(enabled && selected);
+    m_rotateObjectLeftButton->setEnabled(enabled && selected);
+    m_rotateObjectRightButton->setEnabled(enabled && selected);
 }
 
 void SstvScreen::cancelTransmitConfirmation() {
