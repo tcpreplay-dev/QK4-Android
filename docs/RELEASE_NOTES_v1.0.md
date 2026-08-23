@@ -38,9 +38,9 @@ for transmitting and receiving images directly through an Elecraft K4.
 - Immediately terminate transmission using the persistent STOP SSTV control.
 - Automatically return to AUTO RX after transmission.
 
-![SSTV transmit setup and exact-mode image canvas](https://github.com/worldwidedx/QK4-Android/releases/download/v1.0/QK4-Mobile-v1.0-SSTV-TX-1.jpg)
+<img src="https://github.com/worldwidedx/QK4-Android/releases/download/v1.0/QK4-Mobile-v1.0-SSTV-TX-1.jpg" alt="SSTV transmit setup and exact-mode image canvas" width="300">
 
-![SSTV composition, template, and transmit-power controls](https://github.com/worldwidedx/QK4-Android/releases/download/v1.0/QK4-Mobile-v1.0-SSTV-TX-2.jpg)
+<img src="https://github.com/worldwidedx/QK4-Android/releases/download/v1.0/QK4-Mobile-v1.0-SSTV-TX-2.jpg" alt="SSTV composition, template, and transmit-power controls" width="300">
 
 #### Receive
 
@@ -67,7 +67,7 @@ for transmitting and receiving images directly through an Elecraft K4.
 - Configurable receive-history retention with starring, sharing, deletion, and
   protected history clearing.
 
-![SSTV automatic receive, callsign recognition, history, and reply controls](https://github.com/worldwidedx/QK4-Android/releases/download/v1.0/QK4-Mobile-v1.0-SSTV-RX.jpg)
+<img src="https://github.com/worldwidedx/QK4-Android/releases/download/v1.0/QK4-Mobile-v1.0-SSTV-RX.jpg" alt="SSTV automatic receive, callsign recognition, history, and reply controls" width="300">
 
 #### Mobile Integration
 
@@ -76,7 +76,6 @@ for transmitting and receiving images directly through an Elecraft K4.
   image and editing state.
 - RX and TX frequency and radio mode remain visible in the SSTV header.
 - BACK TO RADIO closes SSTV and restores the normal QK4 console.
-- The display remains awake while QK4 is active.
 
 #### Live Testing and Validation
 
@@ -125,6 +124,12 @@ reference.
   actions.
 - Improved callsign, CW-speed, template, TX-power, receive-history, and
   reply-control alignment.
+
+### Application Behavior
+
+- Keeps the screen awake while QK4 Mobile is running in the foreground and
+  releases the request when the app is paused, without changing the device's
+  system-wide screen-timeout setting.
 
 ### Main QK4 Controls
 
