@@ -60,6 +60,55 @@ See [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for the verified state and 
 
 Other platforms remain present in the inherited QK4 source, but this repository's supported product target is Android. Physical acceptance testing has been performed on a Samsung Galaxy S26 Ultra; test other phone families before treating them as validated.
 
+## Recommended K4 operating settings
+
+These settings are practical starting points for remote operation and SSTV.
+Band conditions, interference, antenna performance, and individual
+installations may require different settings.
+
+### SSTV receive
+
+- Use **AGC-F** as the normal starting point. If rapid gain changes or pumping
+  appear to degrade reception, compare results with **AGC-S**.
+- Enable **K4 RX Auto Attenuation**. This allows the K4 to reduce analog
+  front-end gain automatically when exceptionally strong signals threaten
+  receiver dynamic range. It complements AGC-F; AGC and RF gain operate later
+  and cannot correct front-end overload.
+- Leave the preamp off unless it produces a genuine weak-signal improvement.
+  On noisy HF bands, extra preamp gain often raises both signal and noise
+  without improving decoding.
+- Use a receive passband wide enough to preserve the complete SSTV tone range,
+  approximately **1200-2300 Hz**, with reasonable margin on both sides.
+- Avoid filter shift settings that cut off the lower synchronization tones or
+  upper image tones.
+- Start with **NB, NR, SSNR, manual notch, and APF off**. Add processing only
+  when it improves actual image decoding.
+- Use **NB** for repetitive impulse noise and select the lowest effective
+  level. Aggressive blanking can distort SSTV tones or create artifacts when
+  strong signals are nearby.
+- Use **NR or SSNR selectively** for difficult signals. Compare reception with
+  processing on and off; a signal that sounds cleaner to the ear does not
+  necessarily decode better.
+- Rear-panel analog **LINE OUT** levels do not control the network audio stream
+  used by QK4 Mobile.
+
+### SSTV transmit
+
+- Prefer the K4's **DATA** mode for SSTV transmission. It provides a clean
+  audio-data path without speech compression.
+- **USB** may also be used when compression is set to zero and TX EQ is flat.
+- Do not use speech processing, aggressive transmit EQ, or other voice
+  enhancement on SSTV tones.
+- Use only the RF power needed for reliable communication and account for the
+  high duty cycle of SSTV transmissions.
+- Confirm transmission quality with an independent receiver, WebSDR recording,
+  or another SSTV decoder when initially configuring the station.
+
+See the
+[Elecraft K4 Operating Manual](https://ftp.elecraft.com/K4/Manuals%20Downloads/K4%20Built-In%20Operating%20Manual%20rev%20D6/K4BuiltInOperatingManualrevD6.html)
+for detailed descriptions of AGC, attenuation, preamplifiers, noise blanking,
+noise reduction, filtering, and DATA-mode operation.
+
 ## Build on Windows
 
 Install:
