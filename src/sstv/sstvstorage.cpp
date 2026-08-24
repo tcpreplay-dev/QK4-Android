@@ -48,6 +48,12 @@ QString SstvStorage::templatePath(const QString &name) const {
     return QDir(templatesPath()).filePath(QString::fromLatin1(digest) + QStringLiteral(".json"));
 }
 
+QString SstvStorage::templateImagePath(const QString &name) const {
+    const QByteArray digest = QCryptographicHash::hash(name.trimmed().toUtf8(),
+                                                        QCryptographicHash::Sha256).toHex();
+    return QDir(templatesPath()).filePath(QString::fromLatin1(digest) + QStringLiteral(".png"));
+}
+
 QString SstvStorage::imageTemplatesPath() const {
     return QDir(m_rootPath).filePath(QStringLiteral("image-templates"));
 }
@@ -374,6 +380,11 @@ QStringList SstvStorage::userTemplateNames(QString *error) const {
 }
 
 bool SstvStorage::saveUserTemplate(const QString &name, const QJsonObject &state, QString *error) {
+    return saveUserTemplate(name, state, QImage(), error);
+}
+
+bool SstvStorage::saveUserTemplate(const QString &name, const QJsonObject &state,
+                                   const QImage &sourceImage, QString *error) {
     const QString cleanName = name.trimmed().left(40);
     if (cleanName.isEmpty()) {
         setError(error, QStringLiteral("Enter a template name."));
@@ -381,29 +392,69 @@ bool SstvStorage::saveUserTemplate(const QString &name, const QJsonObject &state
     }
     if (!ensureDirectory(templatesPath(), error))
         return false;
+    const QString imagePath = templateImagePath(cleanName);
+    if (!sourceImage.isNull() && !writeImage(imagePath, sourceImage, error))
+        return false;
     QJsonObject document = state;
-    document.insert(QStringLiteral("version"), 1);
+    document.insert(QStringLiteral("version"), 2);
     document.insert(QStringLiteral("name"), cleanName);
-    return writeJson(templatePath(cleanName), document, error);
+    if (!sourceImage.isNull())
+        document.insert(QStringLiteral("sourceFile"), QFileInfo(imagePath).fileName());
+    else
+        document.remove(QStringLiteral("sourceFile"));
+    if (!writeJson(templatePath(cleanName), document, error))
+        return false;
+    if (sourceImage.isNull() && QFileInfo::exists(imagePath) && !QFile::remove(imagePath)) {
+        setError(error, QStringLiteral("Could not remove the image from the SSTV template."));
+        return false;
+    }
+    return true;
 }
 
 bool SstvStorage::loadUserTemplate(const QString &name, QJsonObject *state, QString *error) const {
-    return readJson(templatePath(name), state, error);
+    return loadUserTemplate(name, state, nullptr, error);
+}
+
+bool SstvStorage::loadUserTemplate(const QString &name, QJsonObject *state,
+                                   QImage *sourceImage, QString *error) const {
+    QJsonObject document;
+    if (!readJson(templatePath(name), &document, error))
+        return false;
+    if (sourceImage) {
+        *sourceImage = QImage();
+        const QString fileName = document.value(QStringLiteral("sourceFile")).toString();
+        if (!fileName.isEmpty()) {
+            QImageReader reader(
+                QDir(templatesPath()).filePath(QFileInfo(fileName).fileName()));
+            const QImage image = reader.read();
+            if (image.isNull()) {
+                setError(error, reader.errorString());
+                return false;
+            }
+            *sourceImage = image;
+        }
+    }
+    if (state)
+        *state = document;
+    return true;
 }
 
 bool SstvStorage::removeUserTemplate(const QString &name, QString *error) {
-    const QString path = templatePath(name);
-    if (!QFileInfo::exists(path) || QFile::remove(path))
-        return true;
-    setError(error, QStringLiteral("Could not remove the SSTV template."));
-    return false;
+    for (const QString &path : {templatePath(name), templateImagePath(name)}) {
+        if (QFileInfo::exists(path) && !QFile::remove(path)) {
+            setError(error, QStringLiteral("Could not remove the SSTV template."));
+            return false;
+        }
+    }
+    return true;
 }
 
 bool SstvStorage::resetUserTemplates(QString *error) {
     const QDir directory(templatesPath());
     if (!directory.exists())
         return true;
-    for (const QFileInfo &file : directory.entryInfoList({QStringLiteral("*.json")}, QDir::Files)) {
+    for (const QFileInfo &file : directory.entryInfoList(
+             {QStringLiteral("*.json"), QStringLiteral("*.png")}, QDir::Files)) {
         if (!QFile::remove(file.absoluteFilePath())) {
             setError(error, QStringLiteral("Could not reset the SSTV templates."));
             return false;

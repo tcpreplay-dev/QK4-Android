@@ -13,6 +13,7 @@
 #include <QBoxLayout>
 #include <QDateTime>
 #include <QDir>
+#include <QEventLoop>
 #include <QFileDialog>
 #include <QFile>
 #include <QFileInfo>
@@ -74,9 +75,55 @@ constexpr int SstvTextSizeMinimumPx = 12;
 constexpr int SstvTextSizeMaximumPx = 112;
 constexpr int SstvTextSizeDefaultPx = 28;
 
+QString sstvBuiltinOverrideName(const QString &key) {
+    if (key == QStringLiteral("builtin:cq"))
+        return QStringLiteral("__QK4_DEFAULT_CQ__");
+    if (key == QStringLiteral("builtin:report"))
+        return QStringLiteral("__QK4_DEFAULT_REPORT__");
+    if (key == QStringLiteral("builtin:73"))
+        return QStringLiteral("__QK4_DEFAULT_73__");
+    return QString();
+}
+
+bool sstvIsBuiltinOverrideName(const QString &name) {
+    return name == QStringLiteral("__QK4_DEFAULT_CQ__")
+        || name == QStringLiteral("__QK4_DEFAULT_REPORT__")
+        || name == QStringLiteral("__QK4_DEFAULT_73__");
+}
+
+QString sstvBuiltinBaseName(const QString &key) {
+    if (key == QStringLiteral("builtin:cq"))
+        return QStringLiteral("CQ");
+    if (key == QStringLiteral("builtin:report"))
+        return QStringLiteral("REPORT");
+    return QStringLiteral("73");
+}
+
+QString sstvBuiltinText(const QString &key) {
+    if (key == QStringLiteral("builtin:cq"))
+        return QStringLiteral("CQ CQ CQ\nDE {MY_CALL}");
+    if (key == QStringLiteral("builtin:report"))
+        return QStringLiteral("{TO_CALL}\nDE {MY_CALL}\nRST 595");
+    return QStringLiteral("73 {TO_CALL}\nDE {MY_CALL}");
+}
+
+QString sstvVisibleCheckBoxStyle(int fontSizePx = 10, int indicatorSizePx = 20) {
+    return QStringLiteral(
+        "QCheckBox { color: #ffffff; font-size: %1px; font-weight: 700; "
+        "spacing: 7px; padding: 2px; }"
+        "QCheckBox::indicator { width: %2px; height: %2px; border: 2px solid #6dd4ef; "
+        "border-radius: 3px; background-color: #101314; }"
+        "QCheckBox::indicator:checked { border-color: #f2ad20; "
+        "background-color: #f2ad20; image: url(:/icons/check.svg); }"
+        "QCheckBox::indicator:unchecked:hover { border-color: #ffffff; }"
+        "QCheckBox::indicator:checked:hover { border-color: #ffffff; }")
+        .arg(fontSizePx)
+        .arg(indicatorSizePx);
+}
+
 enum class SstvGlyph {
     Move, Draw, Line, Arrow, Rectangle, Ellipse, Color, RotateLeft, RotateRight,
-    Camera, Undo, Redo, Trash, Save, Edit, Apply, Star, Share, ChevronDown
+    Camera, Undo, Redo, Trash, Save, Edit, Star, Share, ChevronDown
 };
 
 QIcon sstvGlyph(SstvGlyph glyph, const QColor &accent = QColor(QStringLiteral("#f0f0f0"))) {
@@ -198,10 +245,6 @@ QIcon sstvGlyph(SstvGlyph glyph, const QColor &accent = QColor(QStringLiteral("#
         painter.drawLine(9, 42, 17, 41);
         break;
     }
-    case SstvGlyph::Apply:
-        painter.drawLine(8, 25, 19, 36);
-        painter.drawLine(19, 36, 41, 11);
-        break;
     case SstvGlyph::Star: {
         QPolygonF star;
         for (int i = 0; i < 10; ++i) {
@@ -260,8 +303,8 @@ QSize sstvDialogPanelSize(QWidget *parent, int preferredWidth, int preferredHeig
                  qMin(available.height(), preferredHeight));
 }
 
-bool askSstvTxQuestion(QWidget *parent, const QString &title, const QString &message,
-                       const QString &actionLabel) {
+bool askSstvQuestion(QWidget *parent, const QString &title, const QString &message,
+                     const QString &actionLabel) {
     InWindowDialog dialog(parent);
     QWidget *panel = dialog.contentWidget();
     auto *layout = new QVBoxLayout(panel);
@@ -410,6 +453,140 @@ QString promptSstvTxText(QWidget *parent, const QString &title, const QString &l
     if (accepted)
         *accepted = true;
     return multiline ? multiEditor->toPlainText() : singleEditor->text();
+}
+
+struct SstvTemplateSaveChoice {
+    QString name;
+    bool includeImage = false;
+    bool accepted = false;
+};
+
+SstvTemplateSaveChoice promptSstvTemplateSave(QWidget *parent,
+                                              const QString &initialName = QString(),
+                                              bool initiallyIncludeImage = false) {
+    SstvTemplateSaveChoice result;
+    InWindowDialog dialog(parent);
+    QWidget *panel = dialog.contentWidget();
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(10, 8, 10, 8);
+    layout->setSpacing(7);
+
+    auto *title = new QLabel(QStringLiteral("SAVE SSTV TEMPLATE"), panel);
+    title->setAlignment(Qt::AlignCenter);
+    title->setStyleSheet(
+        QStringLiteral("color: #f2ad20; font-size: %1px; font-weight: 700;")
+            .arg(SstvDialogTitlePx));
+    layout->addWidget(title);
+
+    auto *nameLabel = new QLabel(QStringLiteral("TEMPLATE NAME"), panel);
+    nameLabel->setStyleSheet(
+        QStringLiteral("color: #f0f0f0; font-size: %1px; font-weight: 600;")
+            .arg(SstvDialogBodyPx));
+    layout->addWidget(nameLabel);
+
+    auto *nameEdit = new QLineEdit(initialName, panel);
+    nameEdit->setMaxLength(40);
+    nameEdit->setFixedHeight(SstvDialogControlHeight);
+    nameEdit->setStyleSheet(QStringLiteral(
+        "QLineEdit { background: #f4f4f4; color: #111; border: 2px solid #6b7377; "
+        "border-radius: 5px; padding: 5px; font-size: %1px; }"
+        "QLineEdit:focus { border-color: #6dd4ef; }").arg(SstvDialogInputPx));
+    layout->addWidget(nameEdit);
+
+    auto *includeImage = new QCheckBox(QStringLiteral("SAVE CURRENT IMAGE WITH TEMPLATE"), panel);
+    includeImage->setChecked(initiallyIncludeImage);
+    includeImage->setToolTip(QStringLiteral(
+        "Checked: applying the template replaces the TX image. "
+        "Unchecked: only text and markup are applied to the current TX image."));
+    includeImage->setStyleSheet(sstvVisibleCheckBoxStyle(10, 20));
+    layout->addWidget(includeImage);
+
+    auto *buttons = new QHBoxLayout;
+    buttons->setSpacing(8);
+    auto *cancel = new QPushButton(QStringLiteral("CANCEL"), panel);
+    auto *save = new QPushButton(QStringLiteral("SAVE"), panel);
+    for (QPushButton *button : {cancel, save}) {
+        button->setFixedHeight(SstvDialogControlHeight);
+        button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+    }
+    cancel->setStyleSheet(sstvDialogButtonStyle(QStringLiteral("#6dd4ef")));
+    save->setStyleSheet(sstvDialogButtonStyle(QStringLiteral("#f2ad20")));
+    QObject::connect(cancel, &QPushButton::clicked, &dialog, &InWindowDialog::reject);
+    QObject::connect(save, &QPushButton::clicked, &dialog, &InWindowDialog::accept);
+    QObject::connect(nameEdit, &QLineEdit::returnPressed, &dialog, &InWindowDialog::accept);
+    buttons->addWidget(cancel);
+    buttons->addWidget(save);
+    layout->addLayout(buttons);
+
+    dialog.setPanelSize(sstvDialogPanelSize(parent, 520, 205));
+    QTimer::singleShot(0, nameEdit, [nameEdit]() {
+        nameEdit->setFocus(Qt::OtherFocusReason);
+        nameEdit->selectAll();
+    });
+    if (dialog.exec() == InWindowDialog::Accepted) {
+        result.name = nameEdit->text().trimmed();
+        result.includeImage = includeImage->isChecked();
+        result.accepted = !result.name.isEmpty();
+    }
+    return result;
+}
+
+QImage promptSstvGalleryImage(QWidget *parent, QString *error, bool *cancelled) {
+    if (error)
+        error->clear();
+    if (cancelled)
+        *cancelled = false;
+    QString path;
+#ifdef Q_OS_ANDROID
+    if (!SstvMedia::openGallery(error))
+        return QImage();
+    QEventLoop waitLoop;
+    QTimer pollTimer;
+    pollTimer.setInterval(150);
+    QObject::connect(&pollTimer, &QTimer::timeout, &waitLoop, [&]() {
+        path = SstvMedia::takeCompletedImagePath();
+        if (path.isEmpty() && SstvMedia::isOperationActive())
+            return;
+        pollTimer.stop();
+        waitLoop.quit();
+    });
+    pollTimer.start();
+    waitLoop.exec();
+    if (path.isEmpty()) {
+        const QString mediaError = SstvMedia::takeOperationError();
+        if (mediaError.isEmpty()) {
+            if (cancelled)
+                *cancelled = true;
+        } else if (error) {
+            *error = mediaError;
+        }
+        return QImage();
+    }
+#else
+    path = QFileDialog::getOpenFileName(
+        parent, QStringLiteral("Choose template image"), QString(),
+        QStringLiteral("Images (*.png *.jpg *.jpeg *.webp *.bmp)"));
+    if (path.isEmpty()) {
+        if (cancelled)
+            *cancelled = true;
+        return QImage();
+    }
+#endif
+
+    QImageReader reader(path);
+    reader.setAutoTransform(true);
+    QSize decodedSize = reader.size();
+    if (decodedSize.isValid() && qMax(decodedSize.width(), decodedSize.height()) > 4096) {
+        decodedSize.scale(QSize(4096, 4096), Qt::KeepAspectRatio);
+        reader.setScaledSize(decodedSize);
+    }
+    const QImage image = reader.read();
+#ifdef Q_OS_ANDROID
+    QFile::remove(path);
+#endif
+    if (image.isNull() && error)
+        *error = reader.errorString();
+    return image;
 }
 
 QColor promptSstvMarkupColor(QWidget *parent, const QColor &currentColor,
@@ -588,6 +765,111 @@ int promptSstvFont(QWidget *parent, const QComboBox *fontOptions, int currentInd
         return -1;
     return list->currentItem()->data(Qt::UserRole).toInt();
 }
+
+// QComboBox creates a separate native popup window on Android. With Qt's
+// OpenGL-backed Android platform plugin, rapidly opening or dismissing that
+// window can race eglSurface() teardown and abort the whole process. Keep the
+// familiar combo presentation and model API, but render its choices inside the
+// existing SSTV window so no second EGL surface is ever created.
+class SstvInWindowComboBox final : public QComboBox {
+public:
+    explicit SstvInWindowComboBox(const QString &dialogTitle, QWidget *parent = nullptr)
+        : QComboBox(parent), m_dialogTitle(dialogTitle) {}
+
+protected:
+    void showPopup() override {
+        if (!isEnabled() || count() == 0)
+            return;
+
+        QWidget *dialogParent = parentWidget();
+        for (QWidget *candidate = parentWidget(); candidate; candidate = candidate->parentWidget()) {
+            if (candidate->objectName() == QStringLiteral("sstvScreen")) {
+                dialogParent = candidate;
+                break;
+            }
+        }
+        if (!dialogParent)
+            return;
+
+        InWindowDialog dialog(dialogParent);
+        QWidget *panel = dialog.contentWidget();
+        auto *layout = new QVBoxLayout(panel);
+        layout->setContentsMargins(8, 6, 8, 6);
+        layout->setSpacing(5);
+
+        auto *title = new QLabel(m_dialogTitle, panel);
+        title->setAlignment(Qt::AlignCenter);
+        title->setStyleSheet(
+            QStringLiteral("color: #f2ad20; font-size: %1px; font-weight: 700;")
+                .arg(SstvDialogTitlePx));
+        layout->addWidget(title);
+
+        auto *list = new QListWidget(panel);
+        list->setSelectionMode(QAbstractItemView::SingleSelection);
+        list->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
+        list->setStyleSheet(QStringLiteral(
+            "QListWidget { background: #171b1d; color: white; border: 1px solid #516067; "
+            "border-radius: 5px; font-size: 11px; }"
+            "QListWidget::item { padding: 4px 7px; }"
+            "QListWidget::item:selected { background: #245463; border: 1px solid #6dd4ef; }"));
+        for (int index = 0; index < count(); ++index) {
+            auto *item = new QListWidgetItem(itemIcon(index), itemText(index), list);
+            item->setData(Qt::UserRole, index);
+            item->setSizeHint(QSize(0, 30));
+            const QVariant fontData = itemData(index, Qt::FontRole);
+            if (fontData.canConvert<QFont>()) {
+                QFont preview = fontData.value<QFont>();
+                preview.setPixelSize(SstvDialogBodyPx);
+                item->setFont(preview);
+            }
+        }
+        const int initialIndex = qBound(0, currentIndex(), list->count() - 1);
+        list->setCurrentRow(initialIndex);
+#ifdef Q_OS_ANDROID
+        list->viewport()->setAttribute(Qt::WA_AcceptTouchEvents);
+        QScroller::grabGesture(list->viewport(), QScroller::TouchGesture);
+#endif
+        layout->addWidget(list, 1);
+
+        auto *buttons = new QHBoxLayout;
+        buttons->setSpacing(7);
+        auto *cancel = new QPushButton(QStringLiteral("CANCEL"), panel);
+        auto *use = new QPushButton(QStringLiteral("USE"), panel);
+        for (QPushButton *button : {cancel, use}) {
+            button->setFixedHeight(SstvDialogControlHeight);
+            button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Preferred);
+        }
+        cancel->setStyleSheet(sstvDialogButtonStyle(QStringLiteral("#6dd4ef")));
+        use->setStyleSheet(sstvDialogButtonStyle(QStringLiteral("#f2ad20")));
+        QObject::connect(cancel, &QPushButton::clicked, &dialog, &InWindowDialog::reject);
+        QObject::connect(use, &QPushButton::clicked, &dialog, &InWindowDialog::accept);
+        QObject::connect(list, &QListWidget::itemDoubleClicked, &dialog,
+                         [&dialog](QListWidgetItem *) { dialog.accept(); });
+        buttons->addWidget(cancel);
+        buttons->addWidget(use);
+        layout->addLayout(buttons);
+
+        const int visibleRows = qMin(9, count());
+        const int preferredHeight = 86 + visibleRows * 30;
+        dialog.setPanelSize(sstvDialogPanelSize(dialogParent, 560, preferredHeight));
+        QTimer::singleShot(0, list, [list, initialIndex]() {
+            if (QListWidgetItem *item = list->item(initialIndex))
+                list->scrollToItem(item, QAbstractItemView::PositionAtCenter);
+        });
+        if (dialog.exec() == InWindowDialog::Accepted && list->currentItem()) {
+            const int selectedIndex = list->currentItem()->data(Qt::UserRole).toInt();
+            setCurrentIndex(selectedIndex);
+            // Match a native combo box's explicit user-selection signal even
+            // when the operator chooses the item that is already displayed.
+            // Consumers such as the TX template selector use this to make USE
+            // the complete action instead of requiring a second check button.
+            emit activated(selectedIndex);
+        }
+    }
+
+private:
+    QString m_dialogTitle;
+};
 
 QImage fitWithBars(const QImage &source, const QSize &target) {
     QImage frame(target, QImage::Format_RGB32);
@@ -789,7 +1071,8 @@ void SstvScreen::setupUi() {
     connect(m_replyReceiveButton, &QPushButton::clicked,
             this, &SstvScreen::replyToCurrentReceive);
     auto *receiveHistoryRow = new QHBoxLayout;
-    m_receiveHistoryCombo = new QComboBox(receivePage);
+    m_receiveHistoryCombo = new SstvInWindowComboBox(
+        QStringLiteral("SELECT RX HISTORY"), receivePage);
     m_receiveHistoryCombo->setMinimumContentsLength(10);
     m_receiveHistoryCombo->setSizeAdjustPolicy(QComboBox::AdjustToMinimumContentsLengthWithIcon);
     m_receiveHistoryCombo->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -808,7 +1091,8 @@ void SstvScreen::setupUi() {
     receiveHistoryRow->addWidget(m_deleteReceiveButton);
     receiveLayout->addLayout(receiveHistoryRow);
     auto *receiveSettingsRow = new QHBoxLayout;
-    m_retentionCombo = new QComboBox(receivePage);
+    m_retentionCombo = new SstvInWindowComboBox(
+        QStringLiteral("KEEP RECEIVED IMAGES"), receivePage);
     for (int limit : {10, 25, 50, 100})
         m_retentionCombo->addItem(QString::number(limit), limit);
     m_retentionCombo->addItem(QStringLiteral("UNLIMITED"), 0);
@@ -939,7 +1223,8 @@ void SstvScreen::setupUi() {
     controlsWidget->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
 
     controls->addWidget(new QLabel(QStringLiteral("TX MODE • DEFINES EXACT IMAGE"), transmitPage));
-    m_modeCombo = new QComboBox(transmitPage);
+    m_modeCombo = new SstvInWindowComboBox(
+        QStringLiteral("SELECT SSTV MODE"), transmitPage);
     for (const SstvModeSpec &mode : SstvModeRegistry::all()) {
         if (mode.encoderImplemented) {
             m_modeCombo->addItem(QStringLiteral("%1 • %2 × %3 • %4 s")
@@ -1260,7 +1545,8 @@ void SstvScreen::setupUi() {
     m_composer->setFillColor(m_composerFillColor);
 
     auto *typeRow = new QHBoxLayout;
-    m_fontCombo = new QComboBox(transmitPage);
+    m_fontCombo = new SstvInWindowComboBox(
+        QStringLiteral("SELECT FONT"), transmitPage);
     const auto addComposerFont = [this](const QString &label, const QString &family,
                                         QFont::Weight weight = QFont::Normal,
                                         bool italic = false, int stretch = QFont::Unstretched) {
@@ -1377,7 +1663,7 @@ void SstvScreen::setupUi() {
     connect(m_deleteObjectButton, &QPushButton::clicked,
             m_composer, &SstvComposerCanvas::deleteSelectedObject);
     connect(m_resetCompositionButton, &QPushButton::clicked, this, [this]() {
-        if (askSstvTxQuestion(this, QStringLiteral("Reset composition"),
+        if (askSstvQuestion(this, QStringLiteral("Reset composition"),
                               QStringLiteral("Remove all added text and drawing?"),
                               QStringLiteral("RESET")))
             m_composer->resetComposition();
@@ -1402,20 +1688,18 @@ void SstvScreen::setupUi() {
     });
 
     auto *templateRow = new QHBoxLayout;
-    m_templateCombo = new QComboBox(transmitPage);
-    m_applyTemplateButton = new QPushButton(transmitPage);
+    m_templateCombo = new SstvInWindowComboBox(
+        QStringLiteral("SELECT TEMPLATE"), transmitPage);
     m_saveTemplateButton = new QPushButton(transmitPage);
     m_editTemplateButton = new QPushButton(transmitPage);
     m_deleteTemplateButton = new QPushButton(transmitPage);
-    for (QPushButton *button : {m_applyTemplateButton, m_saveTemplateButton,
-                                m_editTemplateButton, m_deleteTemplateButton})
+    for (QPushButton *button : {m_saveTemplateButton, m_editTemplateButton,
+                                m_deleteTemplateButton})
         button->setStyleSheet(buttonStyle(QStringLiteral("#6dd4ef")));
-    makeIconButton(m_applyTemplateButton, SstvGlyph::Apply, QStringLiteral("Apply selected template"));
     makeIconButton(m_saveTemplateButton, SstvGlyph::Save, QStringLiteral("Save current layout as a new template"));
     makeIconButton(m_editTemplateButton, SstvGlyph::Edit, QStringLiteral("Edit selected user template"));
     makeIconButton(m_deleteTemplateButton, SstvGlyph::Trash, QStringLiteral("Delete template"));
     templateRow->addWidget(m_templateCombo, 1);
-    templateRow->addWidget(m_applyTemplateButton);
     templateRow->addWidget(m_saveTemplateButton);
     templateRow->addWidget(m_editTemplateButton);
     templateRow->addWidget(m_deleteTemplateButton);
@@ -1429,7 +1713,6 @@ void SstvScreen::setupUi() {
     recoveryRow->addWidget(m_clearDraftButton);
     recoveryRow->addWidget(m_resetTemplatesButton);
     controls->addLayout(recoveryRow);
-    connect(m_applyTemplateButton, &QPushButton::clicked, this, &SstvScreen::applySelectedTemplate);
     connect(m_saveTemplateButton, &QPushButton::clicked, this, &SstvScreen::saveUserTemplate);
     connect(m_editTemplateButton, &QPushButton::clicked, this, &SstvScreen::editSelectedTemplate);
     connect(m_deleteTemplateButton, &QPushButton::clicked, this, &SstvScreen::deleteUserTemplate);
@@ -1437,6 +1720,9 @@ void SstvScreen::setupUi() {
     connect(m_clearDraftButton, &QPushButton::clicked, this, &SstvScreen::clearDraft);
     connect(m_templateCombo, qOverload<int>(&QComboBox::currentIndexChanged), this, [this](int) {
         updateTemplateActionUi();
+    });
+    connect(m_templateCombo, qOverload<int>(&QComboBox::activated), this, [this](int) {
+        applySelectedTemplate();
     });
 
     controls->addWidget(new QLabel(QStringLiteral("TX POWER • SYNCED"), transmitPage));
@@ -1918,9 +2204,9 @@ void SstvScreen::deleteCurrentReceive() {
 }
 
 void SstvScreen::clearReceiveHistory() {
-    if (QMessageBox::question(this, QStringLiteral("Clear RX history"),
-                              QStringLiteral("Delete every unstarred app-private RX image? Starred and exported images are preserved."))
-        != QMessageBox::Yes)
+    if (!askSstvQuestion(this, QStringLiteral("Clear RX history"),
+                         QStringLiteral("Delete every unstarred app-private RX image? Starred and exported images are preserved."),
+                         QStringLiteral("CLEAR HISTORY")))
         return;
     QString error;
     if (!m_storage.clearUnstarred(&error))
@@ -2166,7 +2452,6 @@ void SstvScreen::updateTransmitUi() {
     m_rotateObjectLeftButton->setEnabled(controlsEnabled && m_composer->hasSelectedObject());
     m_rotateObjectRightButton->setEnabled(controlsEnabled && m_composer->hasSelectedObject());
     m_templateCombo->setEnabled(controlsEnabled);
-    m_applyTemplateButton->setEnabled(controlsEnabled && !m_modeFrame.isNull());
     m_saveTemplateButton->setEnabled(controlsEnabled && !m_modeFrame.isNull());
     updateTemplateActionUi();
     m_resetTemplatesButton->setEnabled(controlsEnabled);
@@ -2413,14 +2698,36 @@ void SstvScreen::refreshTemplates(const QString &selectName) {
     m_templateCombo->clear();
     const QString callLabel = m_operatorCallsign.isEmpty()
                                   ? QStringLiteral("SET MY CALL") : m_operatorCallsign;
-    m_templateCombo->addItem(QStringLiteral("CQ • %1").arg(callLabel), QStringLiteral("builtin:cq"));
-    m_templateCombo->addItem(QStringLiteral("REPORT • %1").arg(callLabel), QStringLiteral("builtin:report"));
-    m_templateCombo->addItem(QStringLiteral("73 • %1").arg(callLabel), QStringLiteral("builtin:73"));
     QString error;
     const QStringList names = m_storage.userTemplateNames(&error);
+    const auto addBuiltin = [this, &names, &callLabel](const QString &key) {
+        const QString overrideName = sstvBuiltinOverrideName(key);
+        bool includesImage = false;
+        if (names.contains(overrideName)) {
+            QJsonObject state;
+            includesImage = m_storage.loadUserTemplate(overrideName, &state)
+                && !state.value(QStringLiteral("sourceFile")).toString().isEmpty();
+        }
+        QString label = QStringLiteral("%1 • %2").arg(sstvBuiltinBaseName(key), callLabel);
+        if (includesImage)
+            label += QStringLiteral(" • IMAGE");
+        m_templateCombo->addItem(label, key);
+    };
+    addBuiltin(QStringLiteral("builtin:cq"));
+    addBuiltin(QStringLiteral("builtin:report"));
+    addBuiltin(QStringLiteral("builtin:73"));
     int selectedIndex = selectName.isEmpty() ? m_templateCombo->findData(previousKey) : -1;
     for (const QString &name : names) {
-        m_templateCombo->addItem(name, QStringLiteral("user:") + name);
+        if (sstvIsBuiltinOverrideName(name))
+            continue;
+        QJsonObject templateState;
+        QString templateError;
+        const bool includesImage = m_storage.loadUserTemplate(
+            name, &templateState, &templateError)
+            && !templateState.value(QStringLiteral("sourceFile")).toString().isEmpty();
+        m_templateCombo->addItem(
+            includesImage ? QStringLiteral("%1 • IMAGE").arg(name) : name,
+            QStringLiteral("user:") + name);
         if (name.compare(selectName, Qt::CaseInsensitive) == 0)
             selectedIndex = m_templateCombo->count() - 1;
     }
@@ -2433,30 +2740,60 @@ void SstvScreen::refreshTemplates(const QString &selectName) {
 }
 
 void SstvScreen::applySelectedTemplate() {
-    if (!m_composer->hasBackground())
-        return;
     const QString key = m_templateCombo->currentData().toString();
+    QString storedName;
     if (key.startsWith(QStringLiteral("user:"))) {
+        storedName = key.mid(5);
+    } else {
+        const QString overrideName = sstvBuiltinOverrideName(key);
+        if (!overrideName.isEmpty()
+            && m_storage.userTemplateNames().contains(overrideName)) {
+            storedName = overrideName;
+        }
+    }
+    if (!storedName.isEmpty()) {
         QJsonObject state;
+        QImage templateImage;
         QString error;
-        if (!m_storage.loadUserTemplate(key.mid(5), &state, &error)
-            || !m_composer->restoreCompositionState(state.value(QStringLiteral("composition")).toObject())) {
+        if (!m_storage.loadUserTemplate(storedName, &state, &templateImage, &error)) {
             m_txStateLabel->setText(QStringLiteral("TEMPLATE FAILED • %1").arg(error));
             return;
         }
+        if (!templateImage.isNull()) {
+            // Use the same complete restore path as the image-template gallery
+            // and recovery draft. Applying the source and composition through
+            // separate UI updates could leave the old canvas background visible
+            // while the newly restored objects were already painted over it.
+            // Layout templates intentionally retain the currently selected mode.
+            state.insert(QStringLiteral("modeId"), m_modeCombo->currentData().toInt());
+            restoreTxState(
+                templateImage, state,
+                QStringLiteral("TEMPLATE APPLIED • IMAGE INCLUDED • REVIEW BEFORE PREVIEW"));
+            m_editingTemplateName.clear();
+            updateTemplateActionUi();
+            return;
+        } else if (!m_composer->hasBackground()) {
+            m_txStateLabel->setText(
+                QStringLiteral("TEMPLATE NEEDS A TX IMAGE • SELECT GALLERY OR CAMERA"));
+            return;
+        }
+        if (!m_composer->restoreCompositionState(
+                state.value(QStringLiteral("composition")).toObject())) {
+            m_txStateLabel->setText(QStringLiteral("TEMPLATE FAILED • INVALID TEMPLATE DATA"));
+            return;
+        }
     } else {
+        if (!m_composer->hasBackground()) {
+            m_txStateLabel->setText(
+                QStringLiteral("TEMPLATE NEEDS A TX IMAGE • SELECT GALLERY OR CAMERA"));
+            return;
+        }
         m_composer->restoreCompositionState(QJsonObject());
         QFont font(QStringLiteral("Sans Serif"));
         font.setPixelSize(qMax(24, m_composer->renderedImage().width() / 10));
         font.setBold(true);
-        QString text;
-        if (key == QStringLiteral("builtin:cq"))
-            text = QStringLiteral("CQ CQ CQ\nDE {MY_CALL}");
-        else if (key == QStringLiteral("builtin:report"))
-            text = QStringLiteral("{TO_CALL}\nDE {MY_CALL}\nRST 595");
-        else
-            text = QStringLiteral("73 {TO_CALL}\nDE {MY_CALL}");
-        m_composer->addTextBlock(text, font, Qt::white, QPointF(0.5, 0.5));
+        m_composer->addTextBlock(sstvBuiltinText(key), font, Qt::white,
+                                 QPointF(0.5, 0.5));
     }
     m_editingTemplateName.clear();
     updateTemplateActionUi();
@@ -2466,44 +2803,80 @@ void SstvScreen::applySelectedTemplate() {
 void SstvScreen::saveUserTemplate() {
     if (!m_composer->hasBackground())
         return;
-    bool accepted = false;
-    const QString name = promptSstvTxText(this, QStringLiteral("Save SSTV template"),
-                                          QStringLiteral("Template name:"), QString(),
-                                          false, &accepted).trimmed();
-    if (!accepted || name.isEmpty())
+    const SstvTemplateSaveChoice choice = promptSstvTemplateSave(this);
+    if (!choice.accepted)
         return;
+    const QString name = choice.name;
     const QStringList existing = m_storage.userTemplateNames();
     if (existing.contains(name, Qt::CaseInsensitive)) {
         m_txStateLabel->setText(
             QStringLiteral("TEMPLATE NAME EXISTS • SELECT IT AND USE EDIT TO UPDATE"));
         return;
     }
-    const QJsonObject state{{QStringLiteral("composition"), m_composer->compositionState()}};
+    QJsonObject state{{QStringLiteral("composition"), m_composer->compositionState()}};
+    if (choice.includeImage) {
+        state.insert(QStringLiteral("fitBars"), m_fitBars);
+        state.insert(QStringLiteral("frameZoom"), m_frameZoom);
+        state.insert(QStringLiteral("frameCenterX"), m_frameCenter.x());
+        state.insert(QStringLiteral("frameCenterY"), m_frameCenter.y());
+    }
     QString error;
-    if (!m_storage.saveUserTemplate(name, state, &error)) {
+    if (!m_storage.saveUserTemplate(name, state,
+                                    choice.includeImage ? m_sourceImage : QImage(), &error)) {
         m_txStateLabel->setText(QStringLiteral("TEMPLATE SAVE FAILED • %1").arg(error));
         return;
     }
     m_editingTemplateName.clear();
     refreshTemplates(name);
-    m_txStateLabel->setText(QStringLiteral("TEMPLATE SAVED • %1").arg(name));
+    m_txStateLabel->setText(
+        QStringLiteral("TEMPLATE SAVED • %1 • %2")
+            .arg(name, choice.includeImage ? QStringLiteral("IMAGE INCLUDED")
+                                           : QStringLiteral("LAYOUT ONLY")));
 }
 
 void SstvScreen::editSelectedTemplate() {
-    if (!m_composer->hasBackground())
-        return;
     const QString key = m_templateCombo->currentData().toString();
     const bool userTemplate = key.startsWith(QStringLiteral("user:"));
-    const QString name = userTemplate ? key.mid(5)
-        : key == QStringLiteral("builtin:cq") ? QStringLiteral("CQ")
-        : key == QStringLiteral("builtin:report") ? QStringLiteral("REPORT")
-                                                  : QStringLiteral("73");
+    const QString overrideName = userTemplate ? QString()
+                                              : sstvBuiltinOverrideName(key);
+    const bool hasBuiltinOverride = !overrideName.isEmpty()
+        && m_storage.userTemplateNames().contains(overrideName);
+    const bool hasStoredTemplate = userTemplate || hasBuiltinOverride;
+    const QString name = userTemplate ? key.mid(5) : sstvBuiltinBaseName(key);
+    const QString storageName = userTemplate ? name : overrideName;
     QJsonObject state;
+    QImage storedTemplateImage;
     QString error;
-    if (userTemplate && !m_storage.loadUserTemplate(name, &state, &error)) {
+    if (hasStoredTemplate
+        && !m_storage.loadUserTemplate(storageName, &state, &storedTemplateImage, &error)) {
         m_txStateLabel->setText(QStringLiteral("TEMPLATE EDIT FAILED • %1").arg(error));
         return;
     }
+    QImage editorSourceImage = storedTemplateImage.isNull() ? m_sourceImage
+                                                             : storedTemplateImage;
+    if (editorSourceImage.isNull()) {
+        m_txStateLabel->setText(
+            QStringLiteral("TEMPLATE EDIT NEEDS AN IMAGE • SELECT GALLERY OR CAMERA"));
+        return;
+    }
+    bool editorFitBars = storedTemplateImage.isNull()
+                             ? m_fitBars : state.value(QStringLiteral("fitBars")).toBool(false);
+    double editorFrameZoom = storedTemplateImage.isNull()
+                                 ? m_frameZoom
+                                 : qBound(1.0,
+                                          state.value(QStringLiteral("frameZoom")).toDouble(1.0),
+                                          4.0);
+    QPointF editorFrameCenter = storedTemplateImage.isNull()
+                                    ? m_frameCenter
+                                    : QPointF(
+                                          qBound(0.0,
+                                                 state.value(QStringLiteral("frameCenterX"))
+                                                     .toDouble(0.5),
+                                                 1.0),
+                                          qBound(0.0,
+                                                 state.value(QStringLiteral("frameCenterY"))
+                                                     .toDouble(0.5),
+                                                 1.0));
     InWindowDialog dialog(this);
     QWidget *panel = dialog.contentWidget();
     auto *layout = new QVBoxLayout(panel);
@@ -2518,8 +2891,8 @@ void SstvScreen::editSelectedTemplate() {
 
     auto *hint = new QLabel(
         userTemplate
-            ? QStringLiteral("Edit this saved layout. The current image is only a preview and is not stored in the template.")
-            : QStringLiteral("Edit this built-in starter, then save it as a new named template. The current image is only a preview."),
+            ? QStringLiteral("Edit the saved layout. INCLUDE IMAGE recalls this picture with the template; unchecked recalls only text and markup over the current TX image.")
+            : QStringLiteral("Edit this default directly. SAVE TEMPLATE replaces the default layout; INCLUDE IMAGE also recalls this picture."),
         panel);
     hint->setWordWrap(true);
     hint->setStyleSheet(QStringLiteral("color: #cbd3d6; font-size: 9px;"));
@@ -2532,25 +2905,25 @@ void SstvScreen::editSelectedTemplate() {
     auto *editor = new SstvComposerCanvas(workspaceWidget);
     editor->setMinimumSize(220, 100);
     editor->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    editor->setBackground(m_modeFrame);
+    const SstvModeSpec *editorMode = SstvModeRegistry::find(
+        static_cast<SstvModeId>(m_modeCombo->currentData().toInt()));
+    const QSize editorTargetSize = editorMode ? QSize(editorMode->width, editorMode->height)
+                                               : m_modeFrame.size();
+    editor->setBackground(frameSource(editorSourceImage, editorTargetSize,
+                                      editorFitBars, editorFrameZoom,
+                                      editorFrameCenter));
     editor->setCallsignValues(m_operatorCallsign, m_replyCallsign);
-    if (userTemplate && !editor->restoreCompositionState(
+    if (hasStoredTemplate && !editor->restoreCompositionState(
             state.value(QStringLiteral("composition")).toObject())) {
         m_txStateLabel->setText(QStringLiteral("TEMPLATE EDIT FAILED • INVALID TEMPLATE DATA"));
         return;
     }
-    if (!userTemplate) {
+    if (!hasStoredTemplate) {
         QFont font(QStringLiteral("Sans Serif"));
         font.setPixelSize(qMax(24, editor->renderedImage().width() / 10));
         font.setBold(true);
-        QString text;
-        if (key == QStringLiteral("builtin:cq"))
-            text = QStringLiteral("CQ CQ CQ\nDE {MY_CALL}");
-        else if (key == QStringLiteral("builtin:report"))
-            text = QStringLiteral("{TO_CALL}\nDE {MY_CALL}\nRST 595");
-        else
-            text = QStringLiteral("73 {TO_CALL}\nDE {MY_CALL}");
-        editor->addTextBlock(text, font, Qt::white, QPointF(0.5, 0.5));
+        editor->addTextBlock(sstvBuiltinText(key), font, Qt::white,
+                             QPointF(0.5, 0.5));
     }
     workspaceLayout->addWidget(editor, 1);
     auto *controlPanel = new QWidget(workspaceWidget);
@@ -2755,13 +3128,13 @@ void SstvScreen::editSelectedTemplate() {
     zoomCaption->setStyleSheet(QStringLiteral("font-size: 9px; color: #f0f0f0;"));
     auto *editorZoomSlider = new QSlider(Qt::Horizontal, panel);
     editorZoomSlider->setRange(100, 400);
-    editorZoomSlider->setValue(qRound(m_frameZoom * 100.0));
+    editorZoomSlider->setValue(qRound(editorFrameZoom * 100.0));
     editorZoomSlider->setMinimumHeight(26);
     editorZoomSlider->setStyleSheet(
         K4Styles::sliderHorizontal(K4Styles::Colors::DarkBackground,
                                    K4Styles::Colors::AccentAmber));
     auto *editorZoomLabel = new QLabel(
-        QStringLiteral("%1×").arg(m_frameZoom, 0, 'f', 1), panel);
+        QStringLiteral("%1×").arg(editorFrameZoom, 0, 'f', 1), panel);
     editorZoomLabel->setFixedWidth(42);
     editorZoomLabel->setAlignment(Qt::AlignCenter);
     editorZoomLabel->setStyleSheet(QStringLiteral("font-size: 10px; color: #f0f0f0;"));
@@ -2775,37 +3148,123 @@ void SstvScreen::editSelectedTemplate() {
     zoomRow->addWidget(editorZoomLabel);
     zoomRow->addWidget(centerButton);
     controlLayout->addLayout(zoomRow);
+
+    auto *imageRow = new QHBoxLayout;
+    imageRow->setSpacing(6);
+    auto *templateGalleryButton = new QPushButton(QStringLiteral("GALLERY IMAGE"), panel);
+    templateGalleryButton->setFixedHeight(30);
+    templateGalleryButton->setStyleSheet(
+        buttonStyle(QStringLiteral("#6dd4ef"))
+        + QStringLiteral("QPushButton { padding: 4px 7px; border-radius: 4px; font-size: 10px; }"));
+    auto *includeImageCheck = new QCheckBox(QStringLiteral("INCLUDE IMAGE"), panel);
+    includeImageCheck->setChecked(!storedTemplateImage.isNull());
+    includeImageCheck->setToolTip(QStringLiteral(
+        "Checked: this image replaces the main TX image when the template is applied. "
+        "Unchecked: only text and markup are recalled."));
+    includeImageCheck->setStyleSheet(sstvVisibleCheckBoxStyle(10, 20));
+    imageRow->addWidget(templateGalleryButton);
+    imageRow->addWidget(includeImageCheck);
+    imageRow->addStretch(1);
+    controlLayout->addLayout(imageRow);
     controlLayout->addStretch(1);
 
-    const auto syncEditorFraming = [this, editor, editorZoomSlider, editorZoomLabel]() {
+    const auto syncEditorFraming = [editor, editorZoomSlider, editorZoomLabel,
+                                    editorTargetSize, &editorSourceImage,
+                                    &editorFitBars, &editorFrameZoom,
+                                    &editorFrameCenter]() {
         const QSignalBlocker blocker(editorZoomSlider);
-        editorZoomSlider->setValue(qRound(m_frameZoom * 100.0));
+        editorZoomSlider->setValue(qRound(editorFrameZoom * 100.0));
         editorZoomLabel->setText(
-            QStringLiteral("%1×").arg(m_frameZoom, 0, 'f', 1));
-        editor->setBackground(m_modeFrame);
+            QStringLiteral("%1×").arg(editorFrameZoom, 0, 'f', 1));
+        editor->setBackground(frameSource(editorSourceImage, editorTargetSize,
+                                          editorFitBars, editorFrameZoom,
+                                          editorFrameCenter));
     };
-    connect(editorZoomSlider, &QSlider::valueChanged, this,
-            [this, syncEditorFraming](int value) {
+    const auto zoomEditorFraming = [editorTargetSize, &editorSourceImage,
+                                    &editorFitBars, &editorFrameZoom,
+                                    &editorFrameCenter](double scaleFactor,
+                                                       const QPointF &normalizedAnchor) {
+        if (editorSourceImage.isNull() || scaleFactor <= 0.0)
+            return;
+        const QRectF oldCrop = framingCrop(editorSourceImage.size(), editorTargetSize,
+                                            editorFitBars, editorFrameZoom,
+                                            editorFrameCenter);
+        if (oldCrop.isEmpty())
+            return;
+        const double newZoom = qBound(1.0, editorFrameZoom * scaleFactor, 4.0);
+        if (qFuzzyCompare(newZoom, editorFrameZoom))
+            return;
+        const QPointF anchor(qBound(0.0, normalizedAnchor.x(), 1.0),
+                             qBound(0.0, normalizedAnchor.y(), 1.0));
+        const QPointF sourceAnchor(oldCrop.left() + anchor.x() * oldCrop.width(),
+                                   oldCrop.top() + anchor.y() * oldCrop.height());
+        editorFrameZoom = newZoom;
+        const QRectF resizedCrop = framingCrop(editorSourceImage.size(), editorTargetSize,
+                                                editorFitBars, editorFrameZoom,
+                                                editorFrameCenter);
+        const QPointF desiredCenter(
+            sourceAnchor.x() + (0.5 - anchor.x()) * resizedCrop.width(),
+            sourceAnchor.y() + (0.5 - anchor.y()) * resizedCrop.height());
+        editorFrameCenter = QPointF(
+            qBound(0.0, desiredCenter.x() / editorSourceImage.width(), 1.0),
+            qBound(0.0, desiredCenter.y() / editorSourceImage.height(), 1.0));
+    };
+    connect(editorZoomSlider, &QSlider::valueChanged, panel,
+            [syncEditorFraming, zoomEditorFraming, &editorFrameZoom](int value) {
         const double requestedZoom = value / 100.0;
-        zoomFraming(requestedZoom / qMax(0.01, m_frameZoom), QPointF(0.5, 0.5));
+        zoomEditorFraming(requestedZoom / qMax(0.01, editorFrameZoom),
+                          QPointF(0.5, 0.5));
         syncEditorFraming();
     });
-    connect(centerButton, &QPushButton::clicked, this, [this, syncEditorFraming]() {
-        resetFraming();
+    connect(centerButton, &QPushButton::clicked, panel,
+            [syncEditorFraming, &editorFrameZoom, &editorFrameCenter]() {
+        editorFrameZoom = 1.0;
+        editorFrameCenter = QPointF(0.5, 0.5);
+        syncEditorFraming();
+    });
+    connect(templateGalleryButton, &QPushButton::clicked, panel,
+            [this, hint, includeImageCheck, syncEditorFraming,
+             &editorSourceImage, &editorFrameZoom, &editorFrameCenter]() {
+        QString pickerError;
+        bool cancelled = false;
+        const QImage selected = promptSstvGalleryImage(this, &pickerError, &cancelled);
+        if (selected.isNull()) {
+            if (!cancelled)
+                hint->setText(QStringLiteral("IMAGE SELECTION FAILED • %1").arg(pickerError));
+            return;
+        }
+        editorSourceImage = selected;
+        editorFrameZoom = 1.0;
+        editorFrameCenter = QPointF(0.5, 0.5);
+        includeImageCheck->setChecked(true);
+        hint->setText(QStringLiteral(
+            "Gallery image loaded. Leave INCLUDE IMAGE checked to store it with this template."));
         syncEditorFraming();
     });
 
     connect(moveButton, &QPushButton::clicked, editor, [editor]() {
         editor->setTool(SstvComposerCanvas::Tool::Select);
     });
-    connect(editor, &SstvComposerCanvas::backgroundPanRequested, this,
-            [this, editor](const QPointF &delta) {
-        panFraming(delta);
-        editor->setBackground(m_modeFrame);
+    connect(editor, &SstvComposerCanvas::backgroundPanRequested, panel,
+            [syncEditorFraming, editorTargetSize, &editorSourceImage,
+             &editorFitBars, &editorFrameZoom,
+             &editorFrameCenter](const QPointF &delta) {
+        const QRectF crop = framingCrop(editorSourceImage.size(), editorTargetSize,
+                                        editorFitBars, editorFrameZoom,
+                                        editorFrameCenter);
+        if (crop.isEmpty())
+            return;
+        const QPointF shiftedCenter = crop.center()
+            - QPointF(delta.x() * crop.width(), delta.y() * crop.height());
+        editorFrameCenter = QPointF(
+            qBound(0.0, shiftedCenter.x() / editorSourceImage.width(), 1.0),
+            qBound(0.0, shiftedCenter.y() / editorSourceImage.height(), 1.0));
+        syncEditorFraming();
     });
-    connect(editor, &SstvComposerCanvas::backgroundZoomRequested, this,
-            [this, syncEditorFraming](qreal factor, const QPointF &anchor) {
-        zoomFraming(factor, anchor);
+    connect(editor, &SstvComposerCanvas::backgroundZoomRequested, panel,
+            [syncEditorFraming, zoomEditorFraming](qreal factor,
+                                                   const QPointF &anchor) {
+        zoomEditorFraming(factor, anchor);
         syncEditorFraming();
     });
     connect(drawButton, &QPushButton::clicked, editor, [editor]() {
@@ -3034,34 +3493,51 @@ void SstvScreen::editSelectedTemplate() {
     if (dialog.exec() != InWindowDialog::Accepted)
         return;
 
-    QString saveName = name;
-    if (!userTemplate) {
-        bool accepted = false;
-        saveName = promptSstvTxText(this, QStringLiteral("Save edited SSTV template"),
-                                    QStringLiteral("New template name:"),
-                                    QStringLiteral("%1 %2").arg(name, m_operatorCallsign),
-                                    false, &accepted).trimmed();
-        if (!accepted || saveName.isEmpty())
-            return;
-        if (m_storage.userTemplateNames().contains(saveName, Qt::CaseInsensitive)) {
-            m_txStateLabel->setText(
-                QStringLiteral("TEMPLATE NAME EXISTS • CHOOSE ANOTHER NAME OR EDIT IT"));
-            return;
-        }
-    }
-    const QJsonObject updatedState{
+    QJsonObject updatedState{
         {QStringLiteral("composition"), editor->compositionState()}};
-    if (!m_storage.saveUserTemplate(saveName, updatedState, &error)) {
+    if (includeImageCheck->isChecked()) {
+        updatedState.insert(QStringLiteral("fitBars"), editorFitBars);
+        updatedState.insert(QStringLiteral("frameZoom"), editorFrameZoom);
+        updatedState.insert(QStringLiteral("frameCenterX"), editorFrameCenter.x());
+        updatedState.insert(QStringLiteral("frameCenterY"), editorFrameCenter.y());
+    }
+    if (!m_storage.saveUserTemplate(
+            storageName, updatedState,
+            includeImageCheck->isChecked() ? editorSourceImage : QImage(), &error)) {
         m_txStateLabel->setText(QStringLiteral("TEMPLATE UPDATE FAILED • %1").arg(error));
         return;
     }
     m_editingTemplateName.clear();
+    if (includeImageCheck->isChecked()) {
+        m_sourceImage = editorSourceImage;
+        m_draftSourceDirty = true;
+        m_fitBars = editorFitBars;
+        m_fitModeButton->setText(m_fitBars ? QStringLiteral("FIT / BARS")
+                                          : QStringLiteral("FILL / CROP"));
+        m_frameZoom = editorFrameZoom;
+        m_frameCenter = editorFrameCenter;
+        {
+            const QSignalBlocker blocker(m_frameZoomSlider);
+            m_frameZoomSlider->setValue(qRound(m_frameZoom * 100.0));
+        }
+        m_frameZoomLabel->setText(
+            QStringLiteral("%1×").arg(m_frameZoom, 0, 'f', 1));
+        refreshModeFrame();
+    }
     m_composer->restoreCompositionState(editor->compositionState());
-    refreshTemplates(saveName);
+    if (userTemplate)
+        refreshTemplates(name);
+    else
+        refreshTemplates();
+    const QString savedKind = includeImageCheck->isChecked()
+                                  ? QStringLiteral("IMAGE INCLUDED")
+                                  : QStringLiteral("LAYOUT ONLY");
     m_txStateLabel->setText(
-        QStringLiteral("TEMPLATE %1 • %2 • LOADED FOR REVIEW")
-            .arg(userTemplate ? QStringLiteral("UPDATED") : QStringLiteral("SAVED"),
-                 saveName));
+        userTemplate
+            ? QStringLiteral("TEMPLATE UPDATED • %1 • %2 • LOADED FOR REVIEW")
+                  .arg(name, savedKind)
+            : QStringLiteral("DEFAULT %1 SAVED • %2 • LOADED FOR REVIEW")
+                  .arg(name, savedKind));
 }
 
 void SstvScreen::deleteUserTemplate() {
@@ -3069,7 +3545,7 @@ void SstvScreen::deleteUserTemplate() {
     if (!key.startsWith(QStringLiteral("user:")))
         return;
     const QString name = key.mid(5);
-    if (!askSstvTxQuestion(this, QStringLiteral("Delete SSTV template"),
+    if (!askSstvQuestion(this, QStringLiteral("Delete SSTV template"),
                            QStringLiteral("Delete the user template %1?").arg(name),
                            QStringLiteral("DELETE")))
         return;
@@ -3082,8 +3558,8 @@ void SstvScreen::deleteUserTemplate() {
 }
 
 void SstvScreen::resetUserTemplates() {
-    if (!askSstvTxQuestion(this, QStringLiteral("Reset SSTV templates"),
-                           QStringLiteral("Delete all user templates and keep the built-in CQ, REPORT, and 73 layouts?"),
+    if (!askSstvQuestion(this, QStringLiteral("Reset SSTV templates"),
+                           QStringLiteral("Delete all user templates and restore the factory CQ, REPORT, and 73 defaults?"),
                            QStringLiteral("RESET")))
         return;
     QString error;
@@ -3099,13 +3575,23 @@ void SstvScreen::updateTemplateActionUi() {
         return;
     const QString key = m_templateCombo->currentData().toString();
     const bool userTemplate = key.startsWith(QStringLiteral("user:"));
+    bool includesImage = false;
+    const QString storedName = userTemplate ? key.mid(5)
+                                            : sstvBuiltinOverrideName(key);
+    if (!storedName.isEmpty()
+        && m_storage.userTemplateNames().contains(storedName)) {
+        QJsonObject state;
+        includesImage = m_storage.loadUserTemplate(storedName, &state)
+            && !state.value(QStringLiteral("sourceFile")).toString().isEmpty();
+    }
     const bool controlsEnabled = !m_transmitting && !m_mediaRequestPending;
     m_deleteTemplateButton->setEnabled(controlsEnabled && userTemplate);
-    m_editTemplateButton->setEnabled(controlsEnabled && !m_modeFrame.isNull());
+    m_editTemplateButton->setEnabled(
+        controlsEnabled && (!m_modeFrame.isNull() || includesImage));
     m_editTemplateButton->setIcon(sstvGlyph(SstvGlyph::Edit));
     const QString action = userTemplate
         ? QStringLiteral("Open selected user template editor")
-        : QStringLiteral("Edit built-in template and save as a new template");
+        : QStringLiteral("Edit and overwrite this default template");
     m_editTemplateButton->setToolTip(action);
     m_editTemplateButton->setAccessibleName(action);
 }
@@ -3293,8 +3779,17 @@ void SstvScreen::openImageTemplateGallery() {
         if (!list->currentItem())
             return;
         selectedName = list->currentItem()->data(Qt::UserRole).toString();
-        selectedAction = selectedName == currentKey ? QStringLiteral("current")
-                                                    : QStringLiteral("use");
+        if (selectedName != currentKey) {
+            QString loadError;
+            if (!loadImageTemplate(selectedName, &loadError)) {
+                hint->setText(
+                    QStringLiteral("IMAGE TEMPLATE LOAD FAILED • %1").arg(loadError));
+                return;
+            }
+            selectedAction = QStringLiteral("used");
+        } else {
+            selectedAction = QStringLiteral("current");
+        }
         dialog.accept();
     });
     connect(save, &QPushButton::clicked, &dialog, [&]() {
@@ -3305,7 +3800,7 @@ void SstvScreen::openImageTemplateGallery() {
         if (!accepted || name.isEmpty())
             return;
         if (names.contains(name, Qt::CaseInsensitive)
-            && !askSstvTxQuestion(this, QStringLiteral("Overwrite image template"),
+            && !askSstvQuestion(this, QStringLiteral("Overwrite image template"),
                                   QStringLiteral("Replace the saved image template named %1?").arg(name),
                                   QStringLiteral("OVERWRITE")))
             return;
@@ -3331,7 +3826,7 @@ void SstvScreen::openImageTemplateGallery() {
         if (!accepted || newName.isEmpty() || newName == oldName)
             return;
         if (names.contains(newName, Qt::CaseInsensitive)
-            && !askSstvTxQuestion(this, QStringLiteral("Overwrite image template"),
+            && !askSstvQuestion(this, QStringLiteral("Overwrite image template"),
                                   QStringLiteral("Replace the saved image template named %1?").arg(newName),
                                   QStringLiteral("OVERWRITE")))
             return;
@@ -3356,7 +3851,7 @@ void SstvScreen::openImageTemplateGallery() {
         const QString name = list->currentItem()->data(Qt::UserRole).toString();
         if (name == currentKey)
             return;
-        if (!askSstvTxQuestion(this, QStringLiteral("Delete image template"),
+        if (!askSstvQuestion(this, QStringLiteral("Delete image template"),
                                QStringLiteral("Delete the saved image template %1?").arg(name),
                                QStringLiteral("DELETE")))
             return;
@@ -3379,11 +3874,7 @@ void SstvScreen::openImageTemplateGallery() {
     // every Android orientation resize.
     dialog.setPanelSize(QSize(1400, 1200));
     dialog.exec();
-    if (selectedAction == QStringLiteral("use")) {
-        QString loadError;
-        if (!loadImageTemplate(selectedName, &loadError))
-            m_txStateLabel->setText(QStringLiteral("IMAGE TEMPLATE LOAD FAILED • %1").arg(loadError));
-    } else if (selectedAction == QStringLiteral("saved")) {
+    if (selectedAction == QStringLiteral("saved")) {
         m_txStateLabel->setText(QStringLiteral("IMAGE TEMPLATE SAVED • %1").arg(selectedName));
     } else if (selectedAction == QStringLiteral("current")) {
         m_txStateLabel->setText(QStringLiteral("CURRENT TX COMPOSITION RETAINED • READY TO EDIT"));
@@ -3430,7 +3921,7 @@ void SstvScreen::restoreDraft() {
 }
 
 void SstvScreen::clearDraft() {
-    if (!askSstvTxQuestion(this, QStringLiteral("Clear TX draft"),
+    if (!askSstvQuestion(this, QStringLiteral("Clear TX draft"),
                            QStringLiteral("Delete the saved recovery draft? The current on-screen composition will remain."),
                            QStringLiteral("CLEAR")))
         return;

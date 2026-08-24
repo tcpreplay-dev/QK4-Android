@@ -178,7 +178,6 @@ private:
     QPushButton *m_redoButton = nullptr;
     QPushButton *m_resetCompositionButton = nullptr;
     QPushButton *m_deleteObjectButton = nullptr;
-    QPushButton *m_applyTemplateButton = nullptr;
     QPushButton *m_saveTemplateButton = nullptr;
     QPushButton *m_editTemplateButton = nullptr;
     QPushButton *m_deleteTemplateButton = nullptr;

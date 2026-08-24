@@ -2,7 +2,7 @@
 
 QK4 Android is a phone-focused Android client for Elecraft K4 transceivers. It preserves the proven radio-control, TCP/TLS, panadapter-stream, and TX/RX audio architecture of QK4 while replacing its desktop-oriented interaction model with a landscape touch interface.
 
-The application is under active development and is intended for testing with an Elecraft K4/K4D on the same network. Version 1.0.1 is the current ARM64 release.
+The application is under active development and is intended for testing with an Elecraft K4/K4D on the same network. Version 1.0.2 is the current ARM64 release.
 
 ![QK4 Mobile v0.8.0 console](https://github.com/worldwidedx/QK4-Android/releases/download/v0.8.0/QK4-Mobile-v0.8.0-Screenshot.png)
 
@@ -77,6 +77,7 @@ From PowerShell or Command Prompt:
 build-android.cmd -Action Doctor
 build-android.cmd -Action Configure
 build-android.cmd -Action Apk
+test-windows.cmd -Action Test
 ```
 
 To make a distribution APK, use the external release keystore and the

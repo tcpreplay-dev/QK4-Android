@@ -1,8 +1,21 @@
 # Project status
 
-Last updated: 2026-08-23
+Last updated: 2026-08-24
 
 ## Released build
+
+**QK4 Mobile v1.0.2** adds complete SSTV templates that can optionally retain
+their source image, crop, zoom, position, text, and markup while preserving
+layout-only templates for use over the current TX image. Built-in CQ, REPORT,
+and 73 templates can be customized directly and restored to their factory
+versions. SSTV mode, font, template, and retention selectors now render inside
+the existing SSTV window, avoiding the Android EGL-surface crash caused by
+rapid native popup creation and teardown. The release also guards and rebuilds
+the local CW sidetone audio device when Android invalidates its output handle,
+correcting the TinyMIDI test dit/dah crash. Android version code is 28. The
+release-signed ARM64 package was signature-verified and installed in place on
+the Samsung Galaxy S26 Ultra; complete image-template recall and TinyMIDI
+dit/dah testing passed on the device.
 
 **QK4 Mobile v1.0.1** adds K4-compatible reverse alternate taps for DATA,
 AFSK, FSK, and PSK, including reverse-aware VFO labels and panadapter/mini-pan
@@ -226,8 +239,10 @@ the compact layout; broader device validation is still required.
   selected layout over the current mode frame, provides the complete text,
   font, size, color, drawing, shape, undo, and reset controls, and saves back
   to that same named template before loading it onto the TX canvas for review.
-  The built-in CQ, REPORT, and 73 starters open in the same editor and save as
-  a new named user template, while remaining protected from overwrite/delete.
+  The built-in CQ, REPORT, and 73 starters open in the same editor and SAVE
+  TEMPLATE directly persists an editable default override, including an
+  optional background image. RESET TEMPLATES restores the factory starters;
+  the main save icon remains the separate save-as-new-template action.
   Complete-image templates now normalize legacy/default zero font stretch to
   normal width on restore, preserving their visible text and markup; the image
   gallery now presents the live TX composition as its first selectable tile,

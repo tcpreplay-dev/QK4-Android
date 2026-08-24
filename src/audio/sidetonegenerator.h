@@ -5,6 +5,7 @@
 #include <QAudioSink>
 #include <QIODevice>
 #include <QByteArray>
+#include <QPointer>
 #include <QtMath>
 #include <atomic>
 
@@ -43,6 +44,8 @@ private slots:
 
 private:
     void initAudio();
+    void destroyAudio();
+    bool ensureAudioReady();
     void playElement(int durationMs);
     int ditDurationMs() const;
     int dahDurationMs() const;
@@ -50,7 +53,10 @@ private:
     enum Element { ElementNone, ElementDit, ElementDah };
 
     QAudioSink *m_audioSink = nullptr;
-    QIODevice *m_pushDevice = nullptr;
+    // QAudioSink owns the push-mode QIODevice. Android audio-route and app
+    // lifecycle changes can invalidate that child independently of this
+    // generator, so a guarded pointer is required here.
+    QPointer<QIODevice> m_pushDevice;
     QTimer *m_repeatTimer = nullptr;
     std::atomic<int> m_frequency{600};
     std::atomic<float> m_volume{0.3f};

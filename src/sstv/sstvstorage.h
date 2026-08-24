@@ -54,7 +54,11 @@ public:
 
     QStringList userTemplateNames(QString *error = nullptr) const;
     bool saveUserTemplate(const QString &name, const QJsonObject &state, QString *error = nullptr);
+    bool saveUserTemplate(const QString &name, const QJsonObject &state,
+                          const QImage &sourceImage, QString *error = nullptr);
     bool loadUserTemplate(const QString &name, QJsonObject *state, QString *error = nullptr) const;
+    bool loadUserTemplate(const QString &name, QJsonObject *state,
+                          QImage *sourceImage, QString *error = nullptr) const;
     bool removeUserTemplate(const QString &name, QString *error = nullptr);
     bool resetUserTemplates(QString *error = nullptr);
 
@@ -72,6 +76,7 @@ private:
     QString draftPath() const;
     QString templatesPath() const;
     QString templatePath(const QString &name) const;
+    QString templateImagePath(const QString &name) const;
     QString imageTemplatesPath() const;
     QString imageTemplatePath(const QString &name) const;
     bool ensureDirectory(const QString &path, QString *error) const;

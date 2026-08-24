@@ -10,6 +10,17 @@ Use the repository script:
 .\build-android.cmd -Action Apk
 ```
 
+Run desktop unit tests through the environment-safe repository wrapper:
+
+```powershell
+.\test-windows.cmd -Action Doctor
+.\test-windows.cmd -Action Test
+```
+
+Do not invoke the Qt MinGW compiler from an unprepared shell. The wrapper
+temporarily supplies the Qt and MinGW runtime DLL paths needed by `cc1plus.exe`
+without changing the user's global `PATH`.
+
 Read `docs/BUILD_ANDROID_WINDOWS.md` when dependency discovery fails.
 
 ## Device installation

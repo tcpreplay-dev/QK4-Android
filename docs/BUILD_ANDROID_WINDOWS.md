@@ -114,6 +114,32 @@ the old application; do not place profile data or passwords in shared storage.
 
 The generated build tree is `build-android-arm64` and is intentionally excluded from Git.
 
+## Run the desktop tests on Windows
+
+Use the repository test runner instead of invoking CMake or Ninja directly:
+
+```powershell
+.\test-windows.cmd -Action Doctor
+.\test-windows.cmd -Action Test
+```
+
+The runner discovers the installed Qt Windows host kit, its matching MinGW
+compiler, CMake, and Ninja. It adds the Qt and MinGW runtime directories to
+`PATH` only for the runner process, configures `build-tests`, compiles the test
+executables, and runs CTest. This prevents `cc1plus.exe` from failing with
+Windows status `0xC0000135` when a normal shell does not contain MinGW's runtime
+DLL directory.
+
+To run only selected tests:
+
+```powershell
+.\test-windows.cmd -Action Test -TestRegex "sstv(storage|composer)"
+```
+
+Nonstandard installations can set `QK4_QT_HOST`, `QK4_MINGW_BIN`,
+`QK4_CMAKE`, or `QK4_NINJA`. The runner does not modify the global or user
+Windows environment.
+
 ## Moving to another PC
 
 1. Clone the private repository (preferred) or copy a complete working tree.

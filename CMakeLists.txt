@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(QK4 VERSION 1.0.1 LANGUAGES CXX)
+project(QK4 VERSION 1.0.2 LANGUAGES CXX)
 include(CTest)
 
 # Optional override paths for Opus when cross-compiling (primarily Android)
@@ -468,6 +468,7 @@ qt_add_resources(${PROJECT_NAME} "icons"
     PREFIX "/"
     BASE "resources"
     FILES
+        resources/icons/check.svg
         resources/icons/globe.svg
         resources/icons/help.svg
 )

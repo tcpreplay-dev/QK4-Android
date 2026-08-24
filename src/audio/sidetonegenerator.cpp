@@ -18,12 +18,13 @@ SidetoneGenerator::~SidetoneGenerator() {
     // Guard against missing stop() call, but this runs on the wrong thread.
     if (m_audioSink) {
         qWarning() << "SidetoneGenerator: audio sink not cleaned up by stop() — destroying from wrong thread";
-        delete m_audioSink;
-        m_audioSink = nullptr;
+        destroyAudio();
     }
 }
 
 void SidetoneGenerator::initAudio() {
+    destroyAudio();
+
     QAudioFormat format;
     format.setSampleRate(48000);
     format.setChannelCount(1);
@@ -36,14 +37,57 @@ void SidetoneGenerator::initAudio() {
         format = device.preferredFormat();
     }
 
-    m_audioSink = new QAudioSink(device, format, this);
-    m_audioSink->setBufferSize(131072); // 128KB - handles even 5 WPM dah (720ms = ~69KB)
+    auto *sink = new QAudioSink(device, format, this);
+    m_audioSink = sink;
+    sink->setBufferSize(131072); // 128KB - handles even 5 WPM dah (720ms = ~69KB)
+
+    // A route change or Android lifecycle transition can stop the backend and
+    // destroy the push-mode QIODevice returned by start(). Invalidate our
+    // handle immediately so the next element rebuilds the complete sink.
+    connect(sink, &QAudioSink::stateChanged, this,
+            [this, sink](QAudio::State state) {
+        if (sink != m_audioSink || state != QAudio::StoppedState)
+            return;
+        m_pushDevice.clear();
+        if (sink->error() != QAudio::NoError)
+            qWarning() << "SidetoneGenerator: audio sink stopped with error"
+                       << sink->error();
+    });
 
     // Start audio sink immediately and keep it running
-    m_pushDevice = m_audioSink->start();
+    m_pushDevice = sink->start();
     if (!m_pushDevice) {
-        qWarning() << "SidetoneGenerator: Failed to start audio sink:" << m_audioSink->error();
+        qWarning() << "SidetoneGenerator: Failed to start audio sink:" << sink->error();
+        return;
     }
+
+    QIODevice *const pushDevice = m_pushDevice.data();
+    connect(pushDevice, &QObject::destroyed, this, [this, pushDevice]() {
+        if (m_pushDevice.data() == pushDevice)
+            m_pushDevice.clear();
+    });
+}
+
+void SidetoneGenerator::destroyAudio() {
+    m_pushDevice.clear();
+    QAudioSink *const sink = m_audioSink;
+    m_audioSink = nullptr;
+    if (!sink)
+        return;
+    disconnect(sink, nullptr, this, nullptr);
+    sink->stop();
+    delete sink;
+}
+
+bool SidetoneGenerator::ensureAudioReady() {
+    if (m_audioSink && m_audioSink->state() != QAudio::StoppedState
+        && !m_pushDevice.isNull()) {
+        return true;
+    }
+
+    initAudio();
+    return m_audioSink && m_audioSink->state() != QAudio::StoppedState
+        && !m_pushDevice.isNull();
 }
 
 void SidetoneGenerator::start() {
@@ -52,12 +96,7 @@ void SidetoneGenerator::start() {
 
 void SidetoneGenerator::stop() {
     m_repeatTimer->stop();
-    if (m_audioSink) {
-        m_audioSink->stop();
-        delete m_audioSink;
-        m_audioSink = nullptr;
-        m_pushDevice = nullptr;
-    }
+    destroyAudio();
 }
 
 void SidetoneGenerator::setFrequency(int hz) {
@@ -128,13 +167,9 @@ int SidetoneGenerator::dahDurationMs() const {
 }
 
 void SidetoneGenerator::playElement(int durationMs) {
-    if (!m_pushDevice) {
-        // Try to restart audio sink if it stopped
-        m_pushDevice = m_audioSink->start();
-        if (!m_pushDevice) {
-            qWarning() << "SidetoneGenerator: Cannot play - no audio device";
-            return;
-        }
+    if (!ensureAudioReady()) {
+        qWarning() << "SidetoneGenerator: Cannot play - no audio device";
+        return;
     }
 
     const int sampleRate = 48000;
@@ -173,5 +208,20 @@ void SidetoneGenerator::playElement(int durationMs) {
 
     // Silence samples are already zero from QByteArray initialization
 
-    m_pushDevice->write(buffer);
+    // Keep a guarded local reference for the duration of the write. QObject
+    // destruction clears both QPointers instead of leaving a non-null dangling
+    // device like the raw pointer that caused the TinyMIDI sidetone crash.
+    const QPointer<QIODevice> pushDevice = m_pushDevice;
+    if (!pushDevice) {
+        qWarning() << "SidetoneGenerator: audio device disappeared before write";
+        return;
+    }
+    const qint64 written = pushDevice->write(buffer);
+    if (written < 0) {
+        qWarning() << "SidetoneGenerator: sidetone write failed; rebuilding audio sink";
+        destroyAudio();
+    } else if (written < buffer.size()) {
+        qWarning() << "SidetoneGenerator: partial sidetone write" << written
+                   << "of" << buffer.size() << "bytes";
+    }
 }

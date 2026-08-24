@@ -86,15 +86,32 @@ void SstvStorageTest::userTemplatesCanBeSavedAndReset() {
     QJsonObject restored;
     QVERIFY2(storage.loadUserTemplate(QStringLiteral("Field Day"), &restored, &error), qPrintable(error));
     QCOMPARE(restored.value(QStringLiteral("composition")).toObject(), state.value(QStringLiteral("composition")).toObject());
+    QImage templateImage(48, 32, QImage::Format_RGB32);
+    templateImage.fill(QColor(QStringLiteral("#336699")));
     const QJsonObject updatedState{
         {QStringLiteral("composition"), QJsonObject{{QStringLiteral("version"), 2}}}};
-    QVERIFY2(storage.saveUserTemplate(QStringLiteral("Field Day"), updatedState, &error),
+    QVERIFY2(storage.saveUserTemplate(QStringLiteral("Field Day"), updatedState,
+                                      templateImage, &error),
              qPrintable(error));
     QCOMPARE(storage.userTemplateNames(), QStringList{QStringLiteral("Field Day")});
-    QVERIFY2(storage.loadUserTemplate(QStringLiteral("Field Day"), &restored, &error),
+    QImage restoredImage;
+    QVERIFY2(storage.loadUserTemplate(QStringLiteral("Field Day"), &restored,
+                                      &restoredImage, &error),
              qPrintable(error));
     QCOMPARE(restored.value(QStringLiteral("composition")).toObject(),
              updatedState.value(QStringLiteral("composition")).toObject());
+    QCOMPARE(restoredImage, templateImage);
+    QVERIFY(!restored.value(QStringLiteral("sourceFile")).toString().isEmpty());
+
+    // Saving without the optional image deliberately converts the same
+    // template back to a layout-only template and removes the prior PNG.
+    QVERIFY2(storage.saveUserTemplate(QStringLiteral("Field Day"), state, &error),
+             qPrintable(error));
+    restoredImage = templateImage;
+    QVERIFY2(storage.loadUserTemplate(QStringLiteral("Field Day"), &restored,
+                                      &restoredImage, &error), qPrintable(error));
+    QVERIFY(restoredImage.isNull());
+    QVERIFY(restored.value(QStringLiteral("sourceFile")).toString().isEmpty());
     QVERIFY2(storage.resetUserTemplates(&error), qPrintable(error));
     QVERIFY(storage.userTemplateNames().isEmpty());
 }

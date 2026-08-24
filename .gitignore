@@ -27,6 +27,7 @@ __pycache__/
 # Build artifacts
 /build/
 /build-host/
+/build-tests/
 /build-android-arm64/
 /build-android-arm64-release/
 /build-android-*/
