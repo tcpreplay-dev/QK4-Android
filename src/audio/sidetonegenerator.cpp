@@ -1,9 +1,77 @@
 #include "sidetonegenerator.h"
 #include <QAudioFormat>
+#include <QAudioDevice>
 #include <QMediaDevices>
 #include <QDebug>
 #include <QTimer>
 #include <QtMath>
+#ifdef Q_OS_ANDROID
+#include <QtMultimedia/private/qaudiodevice_p.h>
+#include <QJniObject>
+#include <qcoreapplication_platform.h>
+#endif
+
+#ifdef Q_OS_ANDROID
+namespace {
+void startAndroidSidetoneRouteMonitor()
+{
+    const QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (context.isValid()) {
+        QJniObject::callStaticMethod<void>(
+                "com/w9wdx/qk4phone/AndroidSidetoneRouteMonitor", "start",
+                "(Landroid/content/Context;)V", context.object());
+    }
+}
+
+void stopAndroidSidetoneRouteMonitor()
+{
+    const QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (context.isValid()) {
+        QJniObject::callStaticMethod<void>(
+                "com/w9wdx/qk4phone/AndroidSidetoneRouteMonitor", "stop",
+                "(Landroid/content/Context;)V", context.object());
+    }
+}
+
+int androidSidetoneRouteGeneration()
+{
+    return QJniObject::callStaticMethod<jint>(
+            "com/w9wdx/qk4phone/AndroidSidetoneRouteMonitor", "getGeneration", "()I");
+}
+
+int androidSidetoneDirectOutputDeviceId()
+{
+    const QJniObject context = QNativeInterface::QAndroidApplication::context();
+    if (!context.isValid())
+        return -1;
+
+    return QJniObject::callStaticMethod<jint>(
+            "com/w9wdx/qk4phone/AndroidSidetoneRouteMonitor",
+            "getPreferredDirectOutputDeviceId", "(Landroid/content/Context;)I",
+            context.object());
+}
+
+QAudioDevice androidSidetoneOutputDevice(int deviceId, const QAudioFormat &format,
+                                        bool systemSelected = false)
+{
+    QAudioDevicePrivate::AudioDeviceFormat deviceFormat;
+    deviceFormat.preferredFormat = format;
+    deviceFormat.minimumSampleRate = 8000;
+    deviceFormat.maximumSampleRate = 192000;
+    deviceFormat.minimumChannelCount = 1;
+    deviceFormat.maximumChannelCount = 8;
+    deviceFormat.supportedSampleFormats = qAllSupportedSampleFormats();
+    deviceFormat.channelConfiguration = QAudioFormat::ChannelConfigUnknown;
+
+    return QAudioDevicePrivate::createQAudioDevice(std::make_unique<QAudioDevicePrivate>(
+            QByteArray::number(deviceId), QAudioDevice::Output,
+            systemSelected ? QStringLiteral("Android sidetone system output")
+                           : QStringLiteral("Android sidetone external output"),
+            false,
+            std::move(deviceFormat)));
+}
+} // namespace
+#endif
 
 SidetoneGenerator::SidetoneGenerator(QObject *parent) : QObject(parent) {
     // Repeat timer created here (moves with parent via moveToThread)
@@ -11,6 +79,28 @@ SidetoneGenerator::SidetoneGenerator(QObject *parent) : QObject(parent) {
     m_repeatTimer = new QTimer(this);
     m_repeatTimer->setTimerType(Qt::PreciseTimer);
     connect(m_repeatTimer, &QTimer::timeout, this, &SidetoneGenerator::onRepeatTimer);
+
+    // Recreate the same low-latency sink after Android's media route settles.
+    // This changes route lifecycle only; sidetone samples never enter the
+    // buffered Android RX AudioTrack that caused the v1.0.4 delay.
+    m_routeRefreshTimer = new QTimer(this);
+    m_routeRefreshTimer->setSingleShot(true);
+    connect(m_routeRefreshTimer, &QTimer::timeout,
+            this, &SidetoneGenerator::refreshAudioRoute);
+
+    m_mediaDevices = new QMediaDevices(this);
+    connect(m_mediaDevices, &QMediaDevices::audioOutputsChanged,
+            this, &SidetoneGenerator::scheduleAudioRouteRefresh);
+
+#ifdef Q_OS_ANDROID
+    // Android exposes hearing aids and some wired/USB endpoints outside Qt's
+    // public device list. Poll a lightweight generation counter updated by an
+    // AudioDeviceCallback so those changes follow the same debounced rebuild.
+    m_androidRoutePollTimer = new QTimer(this);
+    m_androidRoutePollTimer->setInterval(250);
+    connect(m_androidRoutePollTimer, &QTimer::timeout,
+            this, &SidetoneGenerator::pollAndroidAudioRoute);
+#endif
 }
 
 SidetoneGenerator::~SidetoneGenerator() {
@@ -30,7 +120,30 @@ void SidetoneGenerator::initAudio() {
     format.setChannelCount(1);
     format.setSampleFormat(QAudioFormat::Int16);
 
-    QAudioDevice device = QMediaDevices::defaultAudioOutput();
+    QAudioDevice device;
+#ifdef Q_OS_ANDROID
+    const int directOutputId = androidSidetoneDirectOutputDeviceId();
+    m_pendingAndroidOutputId = directOutputId;
+    if (directOutputId >= 0) {
+        device = androidSidetoneOutputDevice(directOutputId, format);
+    } else {
+        // QMediaDevices can retain the removed USB endpoint as its default
+        // device after Android has already routed media back to the speaker.
+        // Device ID 0 is AAUDIO_UNSPECIFIED: it keeps the low-latency native
+        // sink while asking Android audio policy to choose the current media
+        // output (speaker or Bluetooth) instead of reopening that stale ID.
+        device = androidSidetoneOutputDevice(0, format, true);
+    }
+    qDebug() << "SidetoneGenerator: selected Android output device id"
+             << device.id() << "direct endpoint" << (directOutputId >= 0);
+#endif
+    if (device.isNull())
+        device = QMediaDevices::defaultAudioOutput();
+
+    if (device.isNull()) {
+        qWarning() << "SidetoneGenerator: No audio output device available";
+        return;
+    }
 
     if (!device.isFormatSupported(format)) {
         qWarning() << "SidetoneGenerator: Default format not supported, trying nearest";
@@ -91,13 +204,62 @@ bool SidetoneGenerator::ensureAudioReady() {
 }
 
 void SidetoneGenerator::start() {
+    m_running = true;
+#ifdef Q_OS_ANDROID
+    startAndroidSidetoneRouteMonitor();
+    m_lastAndroidRouteGeneration = androidSidetoneRouteGeneration();
+    m_androidRoutePollTimer->start();
+#endif
     initAudio();
 }
 
 void SidetoneGenerator::stop() {
+    m_running = false;
     m_repeatTimer->stop();
+    m_routeRefreshTimer->stop();
+#ifdef Q_OS_ANDROID
+    m_androidRoutePollTimer->stop();
+    stopAndroidSidetoneRouteMonitor();
+#endif
     destroyAudio();
 }
+
+void SidetoneGenerator::scheduleAudioRouteRefresh() {
+    if (!m_running)
+        return;
+
+    // Android emits a burst of topology/default-output changes during a
+    // connection. Restarting this single-shot timer rebuilds only after the
+    // selected media route is stable.
+    m_routeRefreshTimer->start(900);
+}
+
+void SidetoneGenerator::refreshAudioRoute() {
+    if (!m_running)
+        return;
+
+    initAudio();
+    if (m_audioSink && !m_pushDevice.isNull())
+        qDebug() << "SidetoneGenerator: refreshed Android audio route";
+}
+
+#ifdef Q_OS_ANDROID
+void SidetoneGenerator::pollAndroidAudioRoute() {
+    if (!m_running)
+        return;
+
+    const int generation = androidSidetoneRouteGeneration();
+    const int directOutputId = androidSidetoneDirectOutputDeviceId();
+    const bool topologyChanged = generation != m_lastAndroidRouteGeneration;
+    const bool directOutputChanged = directOutputId != m_pendingAndroidOutputId;
+    if (!topologyChanged && !directOutputChanged)
+        return;
+
+    m_lastAndroidRouteGeneration = generation;
+    m_pendingAndroidOutputId = directOutputId;
+    scheduleAudioRouteRefresh();
+}
+#endif
 
 void SidetoneGenerator::setFrequency(int hz) {
     m_frequency.store(hz, std::memory_order_relaxed);

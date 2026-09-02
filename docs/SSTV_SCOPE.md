@@ -30,15 +30,30 @@ calibration/interoperability testing remain release acceptance requirements;
 they are not claims made by the source-level or automated validation.
 
 The native RX path includes weak-signal DSP adapted from the Open-SSTV design
-to QK4's continuous 12 kHz K4 stream: a fixed-delay 1.0-2.5 kHz FIR before the
-FM discriminator, a mode-scaled median line-sync track with a bounded adaptive
-threshold, winsorized pixel-frequency sampling sized for the low sample count,
-and slow sync-derived AFC stored per line and interpolated during the final
-render. Open-SSTV's batch zero-phase SciPy filter is not embedded or copied;
-QK4 retains its native streaming C++ codec. Synthetic coverage includes weak
-audio beneath stronger out-of-band tones, impulse clicks, and 120 Hz of gradual
-image-body drift. These are automated impairment results, not a claim of
-on-air weak-signal performance until captured-audio and K4 tests confirm it.
+to QK4's continuous 12 kHz K4 stream. A fixed-delay 650-2750 Hz FIR preserves
+the complete SSTV tone range at the supported +/-350 Hz AFC limits. A flat
+49-tap complex-baseband FIR and conjugate-product discriminator replace the
+former eight-sample boxcar that disproportionately weakened the low VIS and
+sync tones. VIS bit decisions use central-window robust percentiles rather
+than arithmetic means. The normal complete-preamble detector remains the
+preferred path; an independent guarded fallback can identify a known,
+parity-valid VIS candidate from second-leader evidence even when the first
+leader or break was clipped. That fallback uses non-overlapping VIS tone
+limits and does not announce a mode or render an image until three consecutive,
+tightly timed one-line-period sync pulses confirm it. An unconfirmed candidate
+returns to AUTO RX. Complete-preamble acquisition keeps its established
+two-pulse timing confirmation. The image path retains a
+mode-scaled median line-sync track with a bounded adaptive threshold,
+winsorized pixel-frequency sampling sized for the low sample count, and slow
+sync-derived AFC stored per line and interpolated during final rendering.
+Open-SSTV's batch zero-phase SciPy filter is not embedded or copied; QK4 retains
+its native streaming C++ codec. Synthetic coverage now includes all 22 VIS
+codes at 5 dB input SNR, 20/10/5/0/-5 dB characterization, clipped and weak
+leaders, faded VIS bits, +/-330 Hz offset, header drift, in-band and out-of-band
+interference, impulse clicks, false-start rejection, and 120 Hz of gradual
+image-body drift. Ten private false-trigger Main-RX captures are also replayed
+as negative fixtures outside Git. These are automated impairment results, not
+a claim of on-air weak-signal performance until K4 tests confirm it.
 
 ## Product boundary
 

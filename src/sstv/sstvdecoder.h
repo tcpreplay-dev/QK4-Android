@@ -42,19 +42,28 @@ signals:
 
 private:
     enum class State { SearchingVis, Receiving };
+    enum class AcquisitionKind { FullPreamble, SecondLeaderRecovery };
     struct SyncObservation { int line; qint64 sample; };
     struct AfcObservation { int line; double offsetHz; };
 
     void resetDsp();
     bool boundIdleSearchHistory(qint64 position);
     void initializeBandpass();
+    void initializeIqLowpass();
     double filterBandpass(double sample);
     void demodulate(float sample);
     int classifyTone(double frequency) const;
     void completeToneRun(int tone, qint64 start, qint64 end, int nextTone);
     void tryCorrelatedVisRecovery(qint64 position);
     void tryDecodeVis();
+    void announceModeIfNeeded();
     double meanFrequency(qint64 start, qint64 end) const;
+    double percentileFrequency(qint64 start, qint64 end, double percentile) const;
+    double tonePresenceFraction(qint64 start, qint64 end, double targetHz,
+                                double offsetHz, double toleranceHz) const;
+    qint64 longestToneRun(qint64 start, qint64 end, double targetHz,
+                          double offsetHz, double toleranceHz,
+                          qint64 mergeGapSamples) const;
     void processSyncSample(double frequency, qint64 position);
     void acceptSync(qint64 start, qint64 end);
     void updateImageAfc(int line, qint64 start, qint64 end);
@@ -87,20 +96,19 @@ private:
     std::array<double, BandpassTapCount> m_bandpassHistory{};
     int m_bandpassIndex = 0;
 
-    // Complex-baseband FM discriminator. A short boxcar rejects the image at
-    // twice the 1900 Hz center before phase differentiation.
-    // Eight samples keeps the entire ±800 Hz SSTV deviation inside the first
-    // moving-average lobe while substantially rejecting the 3.8 kHz mixer
-    // image. A longer boxcar introduces nulls inside the SSTV passband.
-    static constexpr int IqWindow = 8;
+    // Complex-baseband FM discriminator. A flat-passband low-pass preserves
+    // the complete AFC-shifted SSTV deviation while rejecting the image around
+    // twice the 1900 Hz mixer frequency. This replaces the former eight-sample
+    // boxcar, whose droop disproportionately weakened 1100/1200 Hz VIS tones.
+    static constexpr int IqTapCount = 49;
+    std::array<double, IqTapCount> m_iqTaps{};
     double m_ncoPhase = 0.0;
-    double m_iHistory[IqWindow]{};
-    double m_qHistory[IqWindow]{};
-    double m_iSum = 0.0;
-    double m_qSum = 0.0;
+    std::array<double, IqTapCount> m_iHistory{};
+    std::array<double, IqTapCount> m_qHistory{};
     int m_iqIndex = 0;
-    bool m_haveBasebandPhase = false;
-    double m_basebandPhase = 0.0;
+    bool m_haveBasebandSample = false;
+    double m_previousI = 0.0;
+    double m_previousQ = 0.0;
     double m_smoothedFrequency = 1900.0;
     double m_levelEnergy = 0.0;
     int m_levelSamples = 0;
@@ -120,6 +128,12 @@ private:
     bool m_ignoreLeaderUntilTransition = false;
     qint64 m_visStart = -1;
     qint64 m_lastCorrelatedVisScan = -1;
+    AcquisitionKind m_acquisitionKind = AcquisitionKind::FullPreamble;
+    bool m_modeAnnounced = false;
+    bool m_acquisitionConfirmed = false;
+    qint64 m_acquisitionDeadline = -1;
+    qint64 m_confirmationSyncSample = -1;
+    int m_confirmationSyncCount = 0;
 
     bool m_inSync = false;
     qint64 m_syncStart = 0;

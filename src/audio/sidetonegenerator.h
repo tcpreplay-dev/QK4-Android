@@ -10,6 +10,7 @@
 #include <atomic>
 
 class QTimer;
+class QMediaDevices;
 
 class SidetoneGenerator : public QObject {
     Q_OBJECT
@@ -41,6 +42,11 @@ signals:
 
 private slots:
     void onRepeatTimer();
+    void scheduleAudioRouteRefresh();
+    void refreshAudioRoute();
+#ifdef Q_OS_ANDROID
+    void pollAndroidAudioRoute();
+#endif
 
 private:
     void initAudio();
@@ -58,6 +64,14 @@ private:
     // generator, so a guarded pointer is required here.
     QPointer<QIODevice> m_pushDevice;
     QTimer *m_repeatTimer = nullptr;
+    QMediaDevices *m_mediaDevices = nullptr;
+    QTimer *m_routeRefreshTimer = nullptr;
+#ifdef Q_OS_ANDROID
+    QTimer *m_androidRoutePollTimer = nullptr;
+    int m_lastAndroidRouteGeneration = -1;
+    int m_pendingAndroidOutputId = -1;
+#endif
+    bool m_running = false;
     std::atomic<int> m_frequency{600};
     std::atomic<float> m_volume{0.3f};
     std::atomic<int> m_keyerWpm{20};

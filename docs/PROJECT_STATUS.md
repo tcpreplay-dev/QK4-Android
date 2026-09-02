@@ -1,8 +1,23 @@
 # Project status
 
-Last updated: 2026-08-24
+Last updated: 2026-09-02
 
 ## Released build
+
+**QK4 Mobile v1.0.3** balances weak-signal SSTV recovery with stronger false-
+start rejection. A damaged-header recovery remains provisional until three
+consecutive, tightly timed line-sync pulses confirm it; unconfirmed candidates
+return silently to AUTO RX. Ten private Main-RX false-trigger captures replay
+with no mode events or completed images, while deterministic coverage includes
+all 22 supported modes at 5 dB input SNR and a range of header impairments. The
+SSTV transmit screen keeps its original portrait layout and moves FSK ID, CW ID,
+and CW speed below the left-aligned MY CALL field in landscape. Low-latency CW
+sidetone now follows speaker, Bluetooth, and USB-C output changes in both
+directions; those routes passed physical testing with TinyMIDI on the Samsung
+Galaxy S26 Ultra. Android hearing-aid sidetone routing is implemented where the
+device is exposed as `TYPE_HEARING_AID`, but still awaits hardware validation.
+Android version code is 29. The WorldWideDX-signed ARM64 APK was installed in
+place, verified byte-for-byte against the source package, and cold-launched.
 
 **QK4 Mobile v1.0.2** adds complete SSTV templates that can optionally retain
 their source image, crop, zoom, position, text, and markup while preserving

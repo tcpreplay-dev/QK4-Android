@@ -3,9 +3,177 @@
 
 #include <QtTest>
 #include <QtMath>
+#include <QDataStream>
+#include <QDir>
+#include <QFile>
 #include <QRegularExpression>
 #include <QSet>
 #include <algorithm>
+
+namespace {
+struct VisFixtureOptions {
+    bool includeFirstLeader = true;
+    bool weakSecondLeader = false;
+    int fadedVisBit = -1;
+    double offsetHz = 0.0;
+    double driftHz = 0.0;
+    double snrDb = 100.0;
+    double inBandInterferer = 0.0;
+    bool impulses = false;
+    int lineSyncCount = 0;
+    double tailMs = 80.0;
+};
+
+QVector<float> makeVisFixture(const SstvModeSpec &mode,
+                              const VisFixtureOptions &options = {}) {
+    QVector<float> samples;
+    samples.reserve(15000);
+    double phase = 0.0;
+    double interferencePhase = 0.0;
+    qint64 generated = 0;
+    quint32 randomState = 0x9e3779b9U ^ static_cast<quint32>(mode.visCode);
+    constexpr double pi = 3.14159265358979323846;
+    const double signalAmplitude = 0.70;
+    const double noiseSigma = options.snrDb >= 90.0
+        ? 0.0
+        : signalAmplitude / qSqrt(2.0 * qPow(10.0, options.snrDb / 10.0));
+    auto gaussianNoise = [&]() {
+        double sum = 0.0;
+        for (int i = 0; i < 12; ++i) {
+            randomState = 1664525U * randomState + 1013904223U;
+            sum += static_cast<double>((randomState >> 8) & 0xffffU) / 65535.0;
+        }
+        return sum - 6.0;
+    };
+    auto appendTone = [&](double nominalHz, double durationMs) {
+        const int count = qRound(durationMs * SstvDecoder::SampleRate / 1000.0);
+        for (int i = 0; i < count; ++i, ++generated) {
+            const double progress = qBound(0.0,
+                static_cast<double>(generated) / (0.95 * SstvDecoder::SampleRate), 1.0);
+            const double frequency = nominalHz + options.offsetHz
+                                     + options.driftHz * progress;
+            phase += 2.0 * pi * frequency / SstvDecoder::SampleRate;
+            interferencePhase += 2.0 * pi * 1650.0 / SstvDecoder::SampleRate;
+            if (phase >= 2.0 * pi) phase -= 2.0 * pi;
+            if (interferencePhase >= 2.0 * pi) interferencePhase -= 2.0 * pi;
+            double sample = signalAmplitude * qSin(phase)
+                            + options.inBandInterferer * qSin(interferencePhase)
+                            + noiseSigma * gaussianNoise();
+            if (options.impulses && (generated % 503) == 0)
+                sample += ((generated / 503) & 1) ? 1.2 : -1.2;
+            samples.append(static_cast<float>(sample));
+        }
+    };
+
+    if (options.includeFirstLeader) {
+        appendTone(1900.0, 300.0);
+        appendTone(1200.0, 10.0);
+    }
+    if (options.weakSecondLeader) {
+        // Damage most of the leading half without reducing the protocol-timed
+        // second-leader evidence to a coincidental short tone burst.
+        appendTone(1500.0, 160.0);
+        appendTone(1900.0, 140.0);
+    } else {
+        appendTone(1900.0, 300.0);
+    }
+    appendTone(1200.0, 30.0);
+    int parity = 0;
+    for (int bit = 0; bit < 7; ++bit) {
+        const bool one = (mode.visCode & (1 << bit)) != 0;
+        const double tone = one ? 1100.0 : 1300.0;
+        if (bit == options.fadedVisBit) {
+            appendTone(tone, 12.0);
+            appendTone(1500.0, 6.0);
+            appendTone(tone, 12.0);
+        } else {
+            appendTone(tone, 30.0);
+        }
+        parity ^= one ? 1 : 0;
+    }
+    appendTone(parity ? 1100.0 : 1300.0, 30.0);
+    appendTone(1200.0, 30.0);
+    if (options.lineSyncCount > 0) {
+        appendTone(1500.0, 25.0);
+        for (int pulse = 0; pulse < options.lineSyncCount; ++pulse) {
+            appendTone(1200.0, mode.lineSyncMs);
+            appendTone(1500.0, mode.lineTimeMs - mode.lineSyncMs);
+        }
+    }
+    appendTone(1500.0, options.tailMs);
+    return samples;
+}
+
+void feedInChunks(SstvDecoder &decoder, const QVector<float> &samples, int chunk = 1200) {
+    for (int offset = 0; offset < samples.size(); offset += chunk)
+        decoder.consumeMono(samples.mid(offset, qMin(chunk, samples.size() - offset)));
+}
+
+bool readCapturedPcm16Wav(const QString &path, QVector<float> *samples, QString *error) {
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        *error = file.errorString();
+        return false;
+    }
+    QDataStream stream(&file);
+    stream.setByteOrder(QDataStream::LittleEndian);
+    const QByteArray riff = file.read(4);
+    quint32 riffSize = 0;
+    stream >> riffSize;
+    Q_UNUSED(riffSize)
+    const QByteArray wave = file.read(4);
+    if (riff != QByteArrayLiteral("RIFF") || wave != QByteArrayLiteral("WAVE")) {
+        *error = QStringLiteral("not a RIFF/WAVE file");
+        return false;
+    }
+
+    quint16 format = 0;
+    quint16 channels = 0;
+    quint32 sampleRate = 0;
+    quint16 bits = 0;
+    QByteArray pcm;
+    while (!stream.atEnd()) {
+        const QByteArray chunkId = file.read(4);
+        if (chunkId.size() != 4)
+            break;
+        quint32 chunkSize = 0;
+        stream >> chunkSize;
+        if (chunkId == QByteArrayLiteral("fmt ")) {
+            if (chunkSize < 16) {
+                *error = QStringLiteral("short fmt chunk");
+                return false;
+            }
+            quint32 byteRate = 0;
+            quint16 blockAlign = 0;
+            stream >> format >> channels >> sampleRate >> byteRate >> blockAlign >> bits;
+            Q_UNUSED(byteRate)
+            Q_UNUSED(blockAlign)
+            if (chunkSize > 16)
+                file.seek(file.pos() + chunkSize - 16);
+        } else if (chunkId == QByteArrayLiteral("data")) {
+            pcm = file.read(chunkSize);
+        } else {
+            file.seek(file.pos() + chunkSize);
+        }
+        if ((chunkSize & 1U) != 0)
+            file.seek(file.pos() + 1);
+    }
+    if (format != 1 || channels != 1 || sampleRate != SstvDecoder::SampleRate
+        || bits != 16 || pcm.isEmpty() || (pcm.size() & 1) != 0) {
+        *error = QStringLiteral("expected mono PCM16 at 12000 Hz");
+        return false;
+    }
+
+    samples->resize(pcm.size() / 2);
+    const uchar *bytes = reinterpret_cast<const uchar *>(pcm.constData());
+    for (qsizetype i = 0; i < samples->size(); ++i) {
+        const quint16 packed = static_cast<quint16>(bytes[2 * i])
+                               | (static_cast<quint16>(bytes[2 * i + 1]) << 8);
+        (*samples)[i] = static_cast<float>(static_cast<qint16>(packed)) / 32768.0f;
+    }
+    return true;
+}
+}
 
 class SstvEncoderTest : public QObject {
     Q_OBJECT
@@ -27,6 +195,17 @@ private slots:
     void visDetectorSearchesDelayedVisBoundary();
     void visDetectorCorrelatesAfterStateChurn();
     void visDetectorAcceptsLongFirstLeader();
+    void secondLeaderRecoveryRequiresThreeSyncs();
+    void allModesAcquireAtFiveDb_data();
+    void allModesAcquireAtFiveDb();
+    void visAcquisitionNoiseThreshold_data();
+    void visAcquisitionNoiseThreshold();
+    void visAcquisitionSurvivesHeaderDamage_data();
+    void visAcquisitionSurvivesHeaderDamage();
+    void unconfirmedVisReturnsToAutoRx();
+    void singleLineSyncDoesNotConfirmAcquisition();
+    void visAcquisitionDoesNotFalseStartOnNoise();
+    void capturedFalseTriggersAreRejected();
     void idleSearchHistoryRemainsBoundedAndRecovers();
     void autoSlantCorrectsSampleClockError();
     void weakSignalRejectsOutOfBandInterference();
@@ -430,8 +609,217 @@ void SstvEncoderTest::visDetectorCorrelatesAfterStateChurn() {
         statuses.append(event.at(0).toString());
     QVERIFY2(modeSpy.size() == 1, qPrintable(statuses.join(QStringLiteral(" | "))));
     QCOMPARE(modeSpy.first().at(0).toInt(), static_cast<int>(mode->id));
-    QVERIFY2(statuses.join(QStringLiteral(" | ")).contains(QStringLiteral("CORRELATION RECOVERY")),
+    QVERIFY2(statuses.join(QStringLiteral(" | ")).contains(QStringLiteral("RECOVERY")),
              qPrintable(statuses.join(QStringLiteral(" | "))));
+}
+
+void SstvEncoderTest::secondLeaderRecoveryRequiresThreeSyncs() {
+    const SstvModeSpec *mode = SstvModeRegistry::find(SstvModeId::Robot36);
+    QVERIFY(mode);
+    VisFixtureOptions options;
+    options.includeFirstLeader = false;
+    options.lineSyncCount = 3;
+    const QVector<float> samples = makeVisFixture(*mode, options);
+
+    SstvDecoder decoder;
+    QSignalSpy modeSpy(&decoder, &SstvDecoder::modeDetected);
+    QSignalSpy statusSpy(&decoder, &SstvDecoder::statusChanged);
+    feedInChunks(decoder, samples);
+
+    QStringList statuses;
+    for (const QList<QVariant> &event : statusSpy)
+        statuses.append(event.at(0).toString());
+    QCOMPARE(modeSpy.size(), 1);
+    QCOMPARE(modeSpy.first().at(0).toInt(), static_cast<int>(mode->id));
+    QVERIFY2(statuses.join(QStringLiteral(" | ")).contains(
+                 QStringLiteral("SYNC CONFIRMED")),
+             qPrintable(statuses.join(QStringLiteral(" | "))));
+}
+
+void SstvEncoderTest::allModesAcquireAtFiveDb_data() {
+    QTest::addColumn<int>("modeId");
+    for (const SstvModeSpec &mode : SstvModeRegistry::all())
+        QTest::newRow(qPrintable(mode.displayName)) << static_cast<int>(mode.id);
+}
+
+void SstvEncoderTest::allModesAcquireAtFiveDb() {
+    QFETCH(int, modeId);
+    const SstvModeSpec *mode = SstvModeRegistry::find(static_cast<SstvModeId>(modeId));
+    QVERIFY(mode);
+    VisFixtureOptions options;
+    options.snrDb = 5.0;
+    const QVector<float> samples = makeVisFixture(*mode, options);
+
+    SstvDecoder decoder;
+    QSignalSpy modeSpy(&decoder, &SstvDecoder::modeDetected);
+    feedInChunks(decoder, samples);
+    QCOMPARE(modeSpy.size(), 1);
+    QCOMPARE(modeSpy.first().at(0).toInt(), modeId);
+}
+
+void SstvEncoderTest::visAcquisitionNoiseThreshold_data() {
+    QTest::addColumn<double>("snrDb");
+    QTest::addColumn<bool>("required");
+    QTest::newRow("20 dB") << 20.0 << true;
+    QTest::newRow("10 dB") << 10.0 << true;
+    QTest::newRow("5 dB") << 5.0 << true;
+    QTest::newRow("0 dB characterization") << 0.0 << false;
+    QTest::newRow("-5 dB characterization") << -5.0 << false;
+}
+
+void SstvEncoderTest::visAcquisitionNoiseThreshold() {
+    QFETCH(double, snrDb);
+    QFETCH(bool, required);
+    const SstvModeSpec *mode = SstvModeRegistry::find(SstvModeId::Robot36);
+    QVERIFY(mode);
+    VisFixtureOptions options;
+    options.snrDb = snrDb;
+    const QVector<float> samples = makeVisFixture(*mode, options);
+
+    SstvDecoder decoder;
+    QSignalSpy modeSpy(&decoder, &SstvDecoder::modeDetected);
+    feedInChunks(decoder, samples);
+    if (required)
+        QCOMPARE(modeSpy.size(), 1);
+    else
+        QVERIFY(modeSpy.size() <= 1);
+    if (!modeSpy.isEmpty())
+        QCOMPARE(modeSpy.first().at(0).toInt(), static_cast<int>(mode->id));
+}
+
+void SstvEncoderTest::visAcquisitionSurvivesHeaderDamage_data() {
+    QTest::addColumn<bool>("includeFirstLeader");
+    QTest::addColumn<bool>("weakSecondLeader");
+    QTest::addColumn<int>("fadedVisBit");
+    QTest::addColumn<double>("offsetHz");
+    QTest::addColumn<double>("driftHz");
+    QTest::addColumn<double>("interferer");
+    QTest::addColumn<bool>("impulses");
+    QTest::newRow("clipped first leader") << false << false << -1 << 0.0 << 0.0 << 0.0 << false;
+    QTest::newRow("weak second leader") << true << true << -1 << 0.0 << 0.0 << 0.0 << false;
+    QTest::newRow("faded VIS bit") << true << false << 3 << 0.0 << 0.0 << 0.0 << false;
+    QTest::newRow("positive AFC edge") << false << false << -1 << 330.0 << 0.0 << 0.0 << false;
+    QTest::newRow("negative AFC edge") << false << false << -1 << -330.0 << 0.0 << 0.0 << false;
+    QTest::newRow("header drift") << false << false << -1 << -120.0 << 240.0 << 0.0 << false;
+    QTest::newRow("in-band interferer") << false << false << -1 << 0.0 << 0.0 << 0.18 << false;
+    QTest::newRow("impulse bursts") << false << false << -1 << 0.0 << 0.0 << 0.0 << true;
+}
+
+void SstvEncoderTest::visAcquisitionSurvivesHeaderDamage() {
+    QFETCH(bool, includeFirstLeader);
+    QFETCH(bool, weakSecondLeader);
+    QFETCH(int, fadedVisBit);
+    QFETCH(double, offsetHz);
+    QFETCH(double, driftHz);
+    QFETCH(double, interferer);
+    QFETCH(bool, impulses);
+    const SstvModeSpec *mode = SstvModeRegistry::find(SstvModeId::ScottieS2);
+    QVERIFY(mode);
+    VisFixtureOptions options;
+    options.includeFirstLeader = includeFirstLeader;
+    options.weakSecondLeader = weakSecondLeader;
+    options.fadedVisBit = fadedVisBit;
+    options.offsetHz = offsetHz;
+    options.driftHz = driftHz;
+    options.inBandInterferer = interferer;
+    options.impulses = impulses;
+    options.snrDb = 18.0;
+    options.lineSyncCount = 3;
+    const QVector<float> samples = makeVisFixture(*mode, options);
+
+    SstvDecoder decoder;
+    QSignalSpy modeSpy(&decoder, &SstvDecoder::modeDetected);
+    feedInChunks(decoder, samples);
+    QCOMPARE(modeSpy.size(), 1);
+    QCOMPARE(modeSpy.first().at(0).toInt(), static_cast<int>(mode->id));
+}
+
+void SstvEncoderTest::unconfirmedVisReturnsToAutoRx() {
+    const SstvModeSpec *mode = SstvModeRegistry::find(SstvModeId::Robot36);
+    QVERIFY(mode);
+    VisFixtureOptions options;
+    options.includeFirstLeader = false;
+    options.tailMs = 900.0;
+    const QVector<float> samples = makeVisFixture(*mode, options);
+
+    SstvDecoder decoder;
+    QSignalSpy modeSpy(&decoder, &SstvDecoder::modeDetected);
+    QSignalSpy statusSpy(&decoder, &SstvDecoder::statusChanged);
+    feedInChunks(decoder, samples);
+    QCOMPARE(modeSpy.size(), 0);
+    QStringList statuses;
+    for (const QList<QVariant> &event : statusSpy)
+        statuses.append(event.at(0).toString());
+    QVERIFY2(statuses.join(QStringLiteral(" | ")).contains(QStringLiteral("NO LINE SYNC")),
+             qPrintable(statuses.join(QStringLiteral(" | "))));
+}
+
+void SstvEncoderTest::singleLineSyncDoesNotConfirmAcquisition() {
+    const SstvModeSpec *mode = SstvModeRegistry::find(SstvModeId::Robot36);
+    QVERIFY(mode);
+    VisFixtureOptions options;
+    options.includeFirstLeader = false;
+    options.lineSyncCount = 1;
+    options.tailMs = 900.0;
+    const QVector<float> samples = makeVisFixture(*mode, options);
+
+    SstvDecoder decoder;
+    QSignalSpy modeSpy(&decoder, &SstvDecoder::modeDetected);
+    QSignalSpy statusSpy(&decoder, &SstvDecoder::statusChanged);
+    feedInChunks(decoder, samples);
+    QCOMPARE(modeSpy.size(), 0);
+    QStringList statuses;
+    for (const QList<QVariant> &event : statusSpy)
+        statuses.append(event.at(0).toString());
+    QVERIFY2(statuses.join(QStringLiteral(" | ")).contains(QStringLiteral("NO LINE SYNC")),
+             qPrintable(statuses.join(QStringLiteral(" | "))));
+}
+
+void SstvEncoderTest::visAcquisitionDoesNotFalseStartOnNoise() {
+    QVector<float> samples;
+    samples.reserve(2 * SstvDecoder::SampleRate);
+    quint32 state = 0x12345678U;
+    double phase = 0.0;
+    constexpr double pi = 3.14159265358979323846;
+    for (int i = 0; i < 2 * SstvDecoder::SampleRate; ++i) {
+        state = 1664525U * state + 1013904223U;
+        const double noise = (static_cast<double>((state >> 8) & 0xffffU) / 32767.5) - 1.0;
+        phase += 2.0 * pi * 1650.0 / SstvDecoder::SampleRate;
+        if (phase >= 2.0 * pi) phase -= 2.0 * pi;
+        samples.append(static_cast<float>(0.50 * noise + 0.25 * qSin(phase)));
+    }
+    SstvDecoder decoder;
+    QSignalSpy modeSpy(&decoder, &SstvDecoder::modeDetected);
+    feedInChunks(decoder, samples);
+    QCOMPARE(modeSpy.size(), 0);
+}
+
+void SstvEncoderTest::capturedFalseTriggersAreRejected() {
+    const QString fixtureRoot = qEnvironmentVariable("QK4_SSTV_NEGATIVE_FIXTURE_DIR");
+    if (fixtureRoot.isEmpty())
+        QSKIP("Set QK4_SSTV_NEGATIVE_FIXTURE_DIR to replay private field captures");
+
+    const QDir directory(fixtureRoot);
+    const QStringList files = directory.entryList({QStringLiteral("*.wav")},
+                                                  QDir::Files, QDir::Name);
+    QVERIFY2(!files.isEmpty(), qPrintable(QStringLiteral("no WAV fixtures in %1")
+                                             .arg(directory.absolutePath())));
+    for (const QString &name : files) {
+        QVector<float> samples;
+        QString error;
+        QVERIFY2(readCapturedPcm16Wav(directory.filePath(name), &samples, &error),
+                 qPrintable(QStringLiteral("%1: %2").arg(name, error)));
+        SstvDecoder decoder;
+        QSignalSpy modeSpy(&decoder, &SstvDecoder::modeDetected);
+        QSignalSpy completeSpy(&decoder, &SstvDecoder::imageCompleted);
+        feedInChunks(decoder, samples);
+        QVERIFY2(modeSpy.isEmpty(),
+                 qPrintable(QStringLiteral("%1 emitted %2 mode events")
+                                .arg(name).arg(modeSpy.size())));
+        QVERIFY2(completeSpy.isEmpty(),
+                 qPrintable(QStringLiteral("%1 completed %2 images")
+                                .arg(name).arg(completeSpy.size())));
+    }
 }
 
 void SstvEncoderTest::visDetectorAcceptsLongFirstLeader() {

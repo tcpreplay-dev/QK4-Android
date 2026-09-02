@@ -104,6 +104,7 @@ private:
     void updateComposerControls();
     void updatePowerUi();
     void updateTransmitUi();
+    void updateCallsignControlsLayout(bool portrait);
     void cancelTransmitConfirmation();
     void setSliderValueFromTouchPosition(QSlider *slider, int xPosition);
     QFont composerFontFromControls() const;
@@ -114,6 +115,9 @@ private:
     QPushButton *m_backButton = nullptr;
     QStackedWidget *m_pages = nullptr;
     QBoxLayout *m_transmitLayout = nullptr;
+    QBoxLayout *m_callsignRowLayout = nullptr;
+    QBoxLayout *m_callsignIdRowLayout = nullptr;
+    QWidget *m_callsignIdRowContainer = nullptr;
     QScrollArea *m_txControlsScroll = nullptr;
     QLabel *m_receiveStatus = nullptr;
     QLabel *m_rxRadioState = nullptr;
@@ -195,6 +199,7 @@ private:
     QString m_editingTemplateName;
     QString m_receiveCallsignSourceValue;
     int m_receiveCallsignConfidence = 0;
+    int m_callsignControlsPortrait = -1;
     QImage m_currentReceiveImage;
     QImage m_sourceImage;
     QImage m_modeFrame;

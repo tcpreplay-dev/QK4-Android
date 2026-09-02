@@ -12,12 +12,6 @@ constexpr double Pi = 3.14159265358979323846;
 constexpr double CenterHz = 1900.0;
 constexpr double TwoPi = 2.0 * Pi;
 
-double wrapPhase(double value) {
-    while (value > Pi) value -= TwoPi;
-    while (value < -Pi) value += TwoPi;
-    return value;
-}
-
 int clampedByte(double value) {
     return qBound(0, qRound(value), 255);
 }
@@ -62,6 +56,7 @@ bool plausibleCallsign(const QString &text) {
 
 SstvDecoder::SstvDecoder(QObject *parent) : QObject(parent) {
     initializeBandpass();
+    initializeIqLowpass();
     m_syncMedianSorted.reserve(128);
     connect(this, &SstvDecoder::statusChanged, this, [](const QString &status) {
         qInfo().noquote() << "SSTV RX STATE:" << status;
@@ -99,12 +94,12 @@ void SstvDecoder::resetDsp() {
     std::fill(m_bandpassHistory.begin(), m_bandpassHistory.end(), 0.0);
     m_bandpassIndex = 0;
     m_ncoPhase = 0.0;
-    std::fill(std::begin(m_iHistory), std::end(m_iHistory), 0.0);
-    std::fill(std::begin(m_qHistory), std::end(m_qHistory), 0.0);
-    m_iSum = m_qSum = 0.0;
+    std::fill(m_iHistory.begin(), m_iHistory.end(), 0.0);
+    std::fill(m_qHistory.begin(), m_qHistory.end(), 0.0);
     m_iqIndex = 0;
-    m_haveBasebandPhase = false;
-    m_basebandPhase = 0.0;
+    m_haveBasebandSample = false;
+    m_previousI = 0.0;
+    m_previousQ = 0.0;
     m_smoothedFrequency = CenterHz;
     m_levelEnergy = 0.0;
     m_levelSamples = 0;
@@ -121,6 +116,12 @@ void SstvDecoder::resetDsp() {
     m_ignoreLeaderUntilTransition = false;
     m_visStart = -1;
     m_lastCorrelatedVisScan = -1;
+    m_acquisitionKind = AcquisitionKind::FullPreamble;
+    m_modeAnnounced = false;
+    m_acquisitionConfirmed = false;
+    m_acquisitionDeadline = -1;
+    m_confirmationSyncSample = -1;
+    m_confirmationSyncCount = 0;
     m_inSync = false;
     m_syncStart = 0;
     m_syncMedianWindow.clear();
@@ -140,13 +141,38 @@ void SstvDecoder::resetDsp() {
     m_robotRy.clear();
 }
 
+void SstvDecoder::initializeIqLowpass() {
+    // 1.5 kHz Hamming-windowed low-pass at 12 kHz. The usable SSTV baseband
+    // extends from about -1150 Hz (1100 Hz VIS at maximum negative AFC) to
+    // +750 Hz. The first real-mixer image begins near -2900 Hz, leaving enough
+    // transition width for a short streaming FIR without passband droop at the
+    // low VIS and sync tones.
+    constexpr double cutoffHz = 1500.0;
+    constexpr int middle = (IqTapCount - 1) / 2;
+    double gain = 0.0;
+    for (int n = 0; n < IqTapCount; ++n) {
+        const int k = n - middle;
+        double ideal = 2.0 * cutoffHz / SampleRate;
+        if (k != 0)
+            ideal = qSin(TwoPi * cutoffHz * k / SampleRate) / (Pi * k);
+        const double window = 0.54 - 0.46 * qCos(TwoPi * n / (IqTapCount - 1));
+        m_iqTaps[n] = ideal * window;
+        gain += m_iqTaps[n];
+    }
+    if (qAbs(gain) > 1.0e-9) {
+        for (double &tap : m_iqTaps)
+            tap /= gain;
+    }
+}
+
 void SstvDecoder::initializeBandpass() {
-    // Windowed-sinc 1.0-2.5 kHz bandpass at 12 kHz. A 65-tap Hamming window
-    // gives useful rejection of receiver hiss and mixer products while adding
-    // only 2.67 ms of fixed latency. Normalize at the 1900 Hz leader so AFC
-    // and input amplitude behave consistently with the unfiltered decoder.
-    constexpr double lowHz = 1000.0;
-    constexpr double highHz = 2500.0;
+    // Windowed-sinc 650-2750 Hz bandpass at 12 kHz. The margin is deliberate:
+    // a receiver offset near the supported +/-350 Hz AFC limit can move the
+    // 1100 Hz VIS tone down to 750 Hz and the 2300 Hz image tone up to 2650 Hz.
+    // A 65-tap Hamming window still rejects low-frequency receiver rumble and
+    // high-frequency noise while adding only 2.67 ms of fixed latency.
+    constexpr double lowHz = 650.0;
+    constexpr double highHz = 2750.0;
     constexpr int middle = (BandpassTapCount - 1) / 2;
     for (int n = 0; n < BandpassTapCount; ++n) {
         const int k = n - middle;
@@ -199,7 +225,7 @@ void SstvDecoder::consumeStereoFloat(const QByteArray &stereoFloat) {
     const float *input = reinterpret_cast<const float *>(stereoFloat.constData());
     for (int i = 0; i < frames; ++i)
         demodulate(input[i * 2]); // Main RX only; Sub RX remains untouched.
-    if (m_state == State::Receiving)
+    if (m_state == State::Receiving && m_modeAnnounced)
         renderAvailableLines();
     if (m_postIdActive && !m_postCwEmitted)
         tryDecodeCwId();
@@ -208,7 +234,7 @@ void SstvDecoder::consumeStereoFloat(const QByteArray &stereoFloat) {
 void SstvDecoder::consumeMono(const QVector<float> &samples) {
     for (float sample : samples)
         demodulate(sample);
-    if (m_state == State::Receiving)
+    if (m_state == State::Receiving && m_modeAnnounced)
         renderAvailableLines();
     if (m_postIdActive && !m_postCwEmitted)
         tryDecodeCwId();
@@ -232,22 +258,32 @@ void SstvDecoder::demodulate(float sample) {
     m_ncoPhase += TwoPi * CenterHz / SampleRate;
     if (m_ncoPhase >= TwoPi) m_ncoPhase -= TwoPi;
 
-    m_iSum += i - m_iHistory[m_iqIndex];
-    m_qSum += q - m_qHistory[m_iqIndex];
     m_iHistory[m_iqIndex] = i;
     m_qHistory[m_iqIndex] = q;
-    m_iqIndex = (m_iqIndex + 1) % IqWindow;
+    double filteredI = 0.0;
+    double filteredQ = 0.0;
+    int historyIndex = m_iqIndex;
+    for (double tap : m_iqTaps) {
+        filteredI += tap * m_iHistory[historyIndex];
+        filteredQ += tap * m_qHistory[historyIndex];
+        if (--historyIndex < 0)
+            historyIndex = IqTapCount - 1;
+    }
+    m_iqIndex = (m_iqIndex + 1) % IqTapCount;
 
-    const double phase = qAtan2(m_qSum, m_iSum);
     double frequency = m_smoothedFrequency;
-    if (m_haveBasebandPhase) {
-        const double delta = wrapPhase(phase - m_basebandPhase);
+    if (m_haveBasebandSample) {
+        // arg(z[n] * conj(z[n-1])) avoids separately wrapping two phases and
+        // remains stable across the +/-pi branch cut.
+        const double delta = qAtan2(filteredQ * m_previousI - filteredI * m_previousQ,
+                                    filteredI * m_previousI + filteredQ * m_previousQ);
         const double raw = CenterHz + delta * SampleRate / TwoPi;
-        if (raw >= 700.0 && raw <= 2600.0)
+        if (raw >= 500.0 && raw <= 2900.0)
             frequency = 0.72 * m_smoothedFrequency + 0.28 * raw;
     }
-    m_haveBasebandPhase = true;
-    m_basebandPhase = phase;
+    m_haveBasebandSample = true;
+    m_previousI = filteredI;
+    m_previousQ = filteredQ;
     m_smoothedFrequency = frequency;
     m_frequency.append(static_cast<float>(frequency));
 
@@ -258,9 +294,9 @@ void SstvDecoder::demodulate(float sample) {
     if (m_state == State::SearchingVis) {
         if (boundIdleSearchHistory(position))
             return;
-        // A valid break + second leader finishes about 310 ms after the first
-        // leader. Do not let a partial header found in image data hold auto RX
-        // in VIS LEADER indefinitely and mask the next genuine transmission.
+        // The permissive path may need the complete 300 ms VIS word before it
+        // can validate a damaged second leader. Do not abandon a first-leader
+        // candidate until that guarded fallback has had time to run.
         if (m_visSequenceDeadline >= 0 && m_visStart < 0
             && position > m_visSequenceDeadline) {
             m_seenFirstLeader = false;
@@ -325,7 +361,7 @@ void SstvDecoder::demodulate(float sample) {
                     m_seenFirstLeader = true;
                     m_seenBreak = true;
                     m_firstLeaderEnd = leaderEnd;
-                    m_visSequenceDeadline = leaderEnd + qRound64(0.45 * SampleRate);
+                    m_visSequenceDeadline = leaderEnd + qRound64(0.70 * SampleRate);
                     m_toneRun = 12;
                     m_toneRunStart = leaderEnd;
                     m_pendingTone = -1;
@@ -377,6 +413,7 @@ void SstvDecoder::demodulate(float sample) {
             }
             if (qAbs(secondLeaderHz - 1900.0) <= 200.0 && matchingFraction >= 0.60) {
                 m_visStart = m_firstLeaderEnd + qRound64(0.310 * SampleRate);
+                m_acquisitionKind = AcquisitionKind::FullPreamble;
                 m_firstLeaderEnd = -1;
                 m_visSequenceDeadline = -1;
                 qInfo().nospace() << "SSTV RX integrated second leader accepted: mean="
@@ -406,6 +443,13 @@ void SstvDecoder::demodulate(float sample) {
         tryDecodeVis();
     } else {
         processSyncSample(frequency, position);
+        if (m_state == State::Receiving && !m_acquisitionConfirmed
+            && m_acquisitionDeadline >= 0 && position > m_acquisitionDeadline) {
+            const QString modeName = m_mode ? m_mode->displayName : QStringLiteral("SSTV");
+            qInfo().noquote() << "SSTV RX abandoned unconfirmed acquisition:" << modeName;
+            resetDsp();
+            emit statusChanged(QStringLiteral("AUTO RX • VIS VALID • NO LINE SYNC • SEARCHING"));
+        }
     }
 }
 
@@ -417,8 +461,8 @@ void SstvDecoder::tryCorrelatedVisRecovery(qint64 position) {
     constexpr qint64 scanCadence = 5 * millisecond;
     const qint64 bitSamples = 30 * millisecond;
     const qint64 wordSamples = 10 * bitSamples;
-    const qint64 headerSamples = 610 * millisecond;
-    if (position + 1 < headerSamples + wordSamples)
+    const qint64 requiredLeaderHistory = 220 * millisecond;
+    if (position + 1 < requiredLeaderHistory + wordSamples)
         return;
     if (m_lastCorrelatedVisScan >= 0
         && position - m_lastCorrelatedVisScan < scanCadence)
@@ -426,79 +470,93 @@ void SstvDecoder::tryCorrelatedVisRecovery(qint64 position) {
     m_lastCorrelatedVisScan = position;
 
     const qint64 latestStart = m_frequency.size() - wordSamples;
-    const qint64 earliestStart = qMax(headerSamples, latestStart - scanCadence);
+    const qint64 earliestStart = qMax(requiredLeaderHistory, latestStart - scanCadence);
     qint64 bestStart = -1;
     double bestOffsetHz = 0.0;
     double bestScore = 1.0e30;
+    bool bestFullPreamble = false;
+    bool bestStrongLeader = false;
 
-    // Scan each millisecond newly exposed since the previous cadence. The
-    // protocol-relative windows make this independent of the transition/run
-    // state while still requiring the complete 910 ms header.
+    // Independently scan each newly exposed millisecond for a clipped-header
+    // recovery. Unlike a complete-preamble acquisition, this path is only a
+    // provisional candidate until several line syncs confirm the mode. Keep
+    // every tone window unambiguous: the VIS data tones are only 200 Hz apart,
+    // so an error allowance at or above 100 Hz can classify arbitrary energy
+    // near their midpoint as either bit value.
     for (qint64 candidateStart = earliestStart; candidateStart <= latestStart;
          candidateStart += millisecond) {
         auto rawBitTone = [this, bitSamples, candidateStart](int index) {
-            return meanFrequency(candidateStart + index * bitSamples + bitSamples / 5,
-                                 candidateStart + (index + 1) * bitSamples
-                                     - bitSamples / 5);
+            const qint64 start = candidateStart + index * bitSamples + bitSamples / 5;
+            const qint64 end = candidateStart + (index + 1) * bitSamples
+                               - bitSamples / 5;
+            // A lower percentile keeps a faded 1100 Hz bit from being pulled
+            // upward by transition smear. Framing tones use the median because
+            // they establish AFC rather than binary polarity.
+            const double percentile = (index >= 1 && index <= 8) ? 0.30 : 0.50;
+            return percentileFrequency(start, end, percentile);
         };
 
         const double startRawHz = rawBitTone(0);
         const double stopRawHz = rawBitTone(9);
         const double framingOffsetHz = (startRawHz + stopRawHz) * 0.5 - 1200.0;
         if (qAbs(framingOffsetHz) > 350.0
-            || qAbs(startRawHz - stopRawHz) > 180.0)
+            || qAbs(startRawHz - stopRawHz) > 200.0)
             continue;
 
-        const qint64 firstLeaderStart = candidateStart - 590 * millisecond;
-        const qint64 firstLeaderEnd = candidateStart - 330 * millisecond;
-        const qint64 breakStart = candidateStart - 306 * millisecond;
-        const qint64 breakEnd = candidateStart - 301 * millisecond;
-        const qint64 secondLeaderStart = candidateStart - 280 * millisecond;
+        const qint64 secondLeaderStart = candidateStart - 220 * millisecond;
         const qint64 secondLeaderEnd = candidateStart - 20 * millisecond;
-        const double firstLeaderHz = meanFrequency(firstLeaderStart, firstLeaderEnd);
-        const double secondLeaderHz = meanFrequency(secondLeaderStart, secondLeaderEnd);
-        const double leaderOffsetHz = (firstLeaderHz + secondLeaderHz) * 0.5 - 1900.0;
+        const double leaderOffsetHz = percentileFrequency(secondLeaderStart,
+                                                          secondLeaderEnd, 0.50)
+                                      - 1900.0;
         if (qAbs(leaderOffsetHz) > 350.0
-            || qAbs(leaderOffsetHz - framingOffsetHz) > 220.0)
+            || qAbs(leaderOffsetHz - framingOffsetHz) > 90.0)
             continue;
-
-        const double offsetHz = 0.70 * leaderOffsetHz + 0.30 * framingOffsetHz;
-        const double breakHz = meanFrequency(breakStart, breakEnd) - offsetHz;
-        if (qAbs(breakHz - 1200.0) > 260.0)
-            continue;
-
-        auto leaderMatch = [this, offsetHz](qint64 start, qint64 end) {
-            int matching = 0;
-            for (qint64 i = start; i < end; ++i) {
-                if (qAbs(m_frequency.at(i) - offsetHz - 1900.0) <= 320.0)
-                    ++matching;
-            }
-            return static_cast<double>(matching) / static_cast<double>(end - start);
-        };
-        const double firstMatch = leaderMatch(firstLeaderStart, firstLeaderEnd);
-        const double secondMatch = leaderMatch(secondLeaderStart, secondLeaderEnd);
-        if (firstMatch < 0.55 || secondMatch < 0.55)
+        const double offsetHz = 0.75 * leaderOffsetHz + 0.25 * framingOffsetHz;
+        const double secondMatch = tonePresenceFraction(secondLeaderStart, secondLeaderEnd,
+                                                        1900.0, offsetHz, 140.0);
+        const qint64 leaderRun = longestToneRun(secondLeaderStart, secondLeaderEnd,
+                                                1900.0, offsetHz, 140.0,
+                                                5 * millisecond);
+        const qint64 mergeGap = 5 * millisecond;
+        const qint64 startRun = longestToneRun(candidateStart,
+                                               candidateStart + bitSamples,
+                                               1200.0, offsetHz, 100.0,
+                                               mergeGap);
+        const qint64 stopRun = longestToneRun(candidateStart + 9 * bitSamples,
+                                              candidateStart + 10 * bitSamples,
+                                              1200.0, offsetHz, 100.0,
+                                              mergeGap);
+        const bool credibleLeader = secondMatch >= 0.50
+                                    && leaderRun >= 80 * millisecond
+                                    && startRun >= 18 * millisecond
+                                    && stopRun >= 18 * millisecond;
+        if (!credibleLeader)
             continue;
 
         const double startError = qAbs(startRawHz - offsetHz - 1200.0);
         const double stopError = qAbs(stopRawHz - offsetHz - 1200.0);
-        if (startError > 150.0 || stopError > 150.0)
+        if (startError > 100.0 || stopError > 100.0)
             continue;
 
         int code = 0;
         int parity = 0;
-        double score = startError + stopError
-                       + qAbs(breakHz - 1200.0)
-                       + qAbs(firstLeaderHz - offsetHz - 1900.0)
-                       + qAbs(secondLeaderHz - offsetHz - 1900.0);
+        double score = startError + stopError + 400.0 * (1.0 - secondMatch);
         bool tonesValid = true;
+        constexpr double dataLimit = 90.0;
         for (int bit = 0; bit < 7; ++bit) {
-            const double hz = rawBitTone(bit + 1) - offsetHz;
+            const int index = bit + 1;
+            const double hz = rawBitTone(index) - offsetHz;
             const double zeroError = qAbs(hz - 1300.0);
             const double oneError = qAbs(hz - 1100.0);
             const bool one = oneError < zeroError;
             const double error = qMin(zeroError, oneError);
-            if (error > 170.0) {
+            const qint64 bitStart = candidateStart + index * bitSamples + bitSamples / 5;
+            const qint64 bitEnd = candidateStart + (index + 1) * bitSamples
+                                  - bitSamples / 5;
+            const double expectedHz = one ? 1100.0 : 1300.0;
+            if (error > dataLimit
+                || tonePresenceFraction(bitStart, bitEnd, expectedHz,
+                                        offsetHz, 100.0) < 0.50) {
                 tonesValid = false;
                 break;
             }
@@ -515,17 +573,43 @@ void SstvDecoder::tryCorrelatedVisRecovery(qint64 position) {
         const double parityOneError = qAbs(parityHz - 1100.0);
         const bool parityOne = parityOneError < parityZeroError;
         const double parityError = qMin(parityZeroError, parityOneError);
-        if (parityError > 170.0 || (parity ^ (parityOne ? 1 : 0)) != 0)
+        const qint64 parityStart = candidateStart + 8 * bitSamples + bitSamples / 5;
+        const qint64 parityEnd = candidateStart + 9 * bitSamples - bitSamples / 5;
+        if (parityError > dataLimit
+            || tonePresenceFraction(parityStart, parityEnd,
+                                    parityOne ? 1100.0 : 1300.0,
+                                    offsetHz, 100.0) < 0.50
+            || (parity ^ (parityOne ? 1 : 0)) != 0)
             continue;
 
         const SstvModeSpec *candidateMode = SstvModeRegistry::findByVis(code);
         if (!candidateMode || !candidateMode->decoderImplemented)
             continue;
-        score += parityError + 100.0 * (2.0 - firstMatch - secondMatch);
+        bool fullPreamble = false;
+        if (candidateStart >= 590 * millisecond) {
+            const qint64 firstLeaderStart = candidateStart - 600 * millisecond;
+            const qint64 firstLeaderEnd = candidateStart - 350 * millisecond;
+            const qint64 breakSearchStart = candidateStart - 335 * millisecond;
+            const qint64 breakSearchEnd = candidateStart - 285 * millisecond;
+            const double firstMatch = tonePresenceFraction(firstLeaderStart, firstLeaderEnd,
+                                                           1900.0, offsetHz, 140.0);
+            const qint64 breakRun = longestToneRun(breakSearchStart, breakSearchEnd,
+                                                   1200.0, offsetHz, 180.0,
+                                                   2 * millisecond);
+            fullPreamble = firstMatch >= 0.55 && secondMatch >= 0.55
+                           && breakRun >= 4 * millisecond;
+            if (fullPreamble)
+                score -= 100.0;
+        }
+        const bool strongLeader = secondMatch >= 0.70
+                                  && leaderRun >= 140 * millisecond;
+        score += parityError + (strongLeader ? 0.0 : 80.0);
         if (score < bestScore) {
             bestStart = candidateStart;
             bestOffsetHz = offsetHz;
             bestScore = score;
+            bestFullPreamble = fullPreamble;
+            bestStrongLeader = strongLeader;
         }
     }
 
@@ -533,15 +617,23 @@ void SstvDecoder::tryCorrelatedVisRecovery(qint64 position) {
         return;
 
     m_visStart = bestStart;
+    m_acquisitionKind = bestFullPreamble
+        ? AcquisitionKind::FullPreamble
+        : AcquisitionKind::SecondLeaderRecovery;
     m_tuningOffsetHz = bestOffsetHz;
     m_haveTuningOffset = true;
     m_seenFirstLeader = true;
     m_seenBreak = true;
     m_firstLeaderEnd = -1;
     m_visSequenceDeadline = -1;
-    qInfo().nospace() << "SSTV RX correlated VIS recovery: AFC="
-                      << qRound(m_tuningOffsetHz) << " Hz";
-    emit statusChanged(QStringLiteral("AUTO RX • VIS HEADER DETECTED • CORRELATION RECOVERY"));
+    qInfo().nospace() << "SSTV RX confidence-tiered VIS recovery: AFC="
+                      << qRound(m_tuningOffsetHz) << " Hz fullPreamble="
+                      << bestFullPreamble << " strongLeader=" << bestStrongLeader;
+    if (bestFullPreamble) {
+        emit statusChanged(QStringLiteral("AUTO RX • VIS HEADER DETECTED • CORRELATION RECOVERY"));
+    } else {
+        emit statusChanged(QStringLiteral("AUTO RX • VIS CANDIDATE • VERIFYING LINE SYNC"));
+    }
 }
 
 bool SstvDecoder::boundIdleSearchHistory(qint64 position) {
@@ -624,6 +716,7 @@ void SstvDecoder::completeToneRun(int tone, qint64 start, qint64 end, int nextTo
                 m_firstLeaderEnd = -1;
                 m_visSequenceDeadline = -1;
                 m_visStart = end;
+                m_acquisitionKind = AcquisitionKind::FullPreamble;
                 emit statusChanged(QStringLiteral("AUTO RX • VIS HEADER DETECTED"));
                 return;
             }
@@ -636,7 +729,7 @@ void SstvDecoder::completeToneRun(int tone, qint64 start, qint64 end, int nextTo
             m_haveTuningOffset = true;
             m_seenFirstLeader = true;
             m_firstLeaderEnd = end;
-            m_visSequenceDeadline = end + qRound64(0.45 * SampleRate);
+            m_visSequenceDeadline = end + qRound64(0.70 * SampleRate);
             emit statusChanged(QStringLiteral("AUTO RX • VIS LEADER • AFC %1 Hz")
                                    .arg(qRound(m_tuningOffsetHz)));
         } else if (tone == 19) {
@@ -668,6 +761,7 @@ void SstvDecoder::completeToneRun(int tone, qint64 start, qint64 end, int nextTo
     if (tone == 19 && length >= qRound64(0.24 * SampleRate)
         && length <= qRound64(0.60 * SampleRate)) {
         m_visStart = end;
+        m_acquisitionKind = AcquisitionKind::FullPreamble;
         m_firstLeaderEnd = -1;
         m_visSequenceDeadline = -1;
         emit statusChanged(QStringLiteral("AUTO RX • VIS HEADER DETECTED"));
@@ -677,6 +771,7 @@ void SstvDecoder::completeToneRun(int tone, qint64 start, qint64 end, int nextTo
 void SstvDecoder::tryDecodeVis() {
     if (m_visStart < 0)
         return;
+    const bool recovery = m_acquisitionKind == AcquisitionKind::SecondLeaderRecovery;
     const int bitSamples = qRound(0.030 * SampleRate);
     const qint64 predictedVisStart = m_visStart;
     const qint64 searchStart = qMax<qint64>(0, predictedVisStart - qRound64(0.060 * SampleRate));
@@ -703,9 +798,11 @@ void SstvDecoder::tryDecodeVis() {
     for (qint64 candidateStart = searchStart; candidateStart <= availableSearchEnd;
          candidateStart += alignmentStep) {
         auto rawBitTone = [this, bitSamples, candidateStart](int index) {
-            return meanFrequency(candidateStart + index * bitSamples + bitSamples / 5,
-                                 candidateStart + (index + 1) * bitSamples
-                                     - bitSamples / 5);
+            const qint64 start = candidateStart + index * bitSamples + bitSamples / 5;
+            const qint64 end = candidateStart + (index + 1) * bitSamples
+                               - bitSamples / 5;
+            return percentileFrequency(start, end,
+                                       (index >= 1 && index <= 8) ? 0.30 : 0.50);
         };
         const double startRawHz = rawBitTone(0);
         const double stopRawHz = rawBitTone(9);
@@ -715,7 +812,8 @@ void SstvDecoder::tryDecodeVis() {
 
         const double startError = qAbs(startRawHz - offsetHz - 1200.0);
         const double stopError = qAbs(stopRawHz - offsetHz - 1200.0);
-        if (startError > 140.0 || stopError > 140.0)
+        const double framingLimit = recovery ? 100.0 : 140.0;
+        if (startError > framingLimit || stopError > framingLimit)
             continue;
 
         int code = 0;
@@ -729,7 +827,15 @@ void SstvDecoder::tryDecodeVis() {
             const double oneError = qAbs(hz - 1100.0);
             const bool one = oneError < zeroError;
             const double error = qMin(zeroError, oneError);
-            if (error > 170.0) {
+            const int index = bit + 1;
+            const qint64 bitStart = candidateStart + index * bitSamples + bitSamples / 5;
+            const qint64 bitEnd = candidateStart + (index + 1) * bitSamples
+                                  - bitSamples / 5;
+            const double expectedHz = one ? 1100.0 : 1300.0;
+            if (error > (recovery ? 90.0 : 170.0)
+                || (recovery
+                    && tonePresenceFraction(bitStart, bitEnd, expectedHz,
+                                            offsetHz, 100.0) < 0.50)) {
                 tonesValid = false;
                 break;
             }
@@ -746,7 +852,14 @@ void SstvDecoder::tryDecodeVis() {
         const double parityOneError = qAbs(parityHz - 1100.0);
         const bool parityOne = parityOneError < parityZeroError;
         const double parityError = qMin(parityZeroError, parityOneError);
-        if (parityError > 170.0 || (parity ^ (parityOne ? 1 : 0)) != 0)
+        const qint64 parityStart = candidateStart + 8 * bitSamples + bitSamples / 5;
+        const qint64 parityEnd = candidateStart + 9 * bitSamples - bitSamples / 5;
+        if (parityError > (recovery ? 90.0 : 170.0)
+            || (recovery
+                && tonePresenceFraction(parityStart, parityEnd,
+                                        parityOne ? 1100.0 : 1300.0,
+                                        offsetHz, 100.0) < 0.50)
+            || (parity ^ (parityOne ? 1 : 0)) != 0)
             continue;
 
         const SstvModeSpec *candidateMode = SstvModeRegistry::findByVis(code);
@@ -782,8 +895,10 @@ void SstvDecoder::tryDecodeVis() {
         return;
     }
     auto bitTone = [this, bitSamples](int index) {
-        return meanFrequency(m_visStart + index * bitSamples + bitSamples / 5,
-                             m_visStart + (index + 1) * bitSamples - bitSamples / 5)
+        return percentileFrequency(m_visStart + index * bitSamples + bitSamples / 5,
+                                   m_visStart + (index + 1) * bitSamples
+                                       - bitSamples / 5,
+                                   (index >= 1 && index <= 8) ? 0.30 : 0.50)
                - m_tuningOffsetHz;
     };
     const double startToneHz = bitTone(0);
@@ -852,6 +967,11 @@ void SstvDecoder::tryDecodeVis() {
     m_state = State::Receiving;
     m_linePeriod = nominalLineSamples();
     m_imageStart = m_visStart + 10LL * bitSamples;
+    m_acquisitionConfirmed = false;
+    m_acquisitionDeadline = m_imageStart
+                            + qRound64((recovery ? 5.0 : 3.0) * m_linePeriod);
+    m_confirmationSyncSample = -1;
+    m_confirmationSyncCount = 0;
     m_imageAfc.append({0, m_tuningOffsetHz});
     m_renderTuningOffsetHz = m_tuningOffsetHz;
     // The VIS stop bit and the first scan-line sync are both 1200 Hz and are
@@ -866,8 +986,21 @@ void SstvDecoder::tryDecodeVis() {
     m_image.fill(Qt::black);
     if (m_mode->id == SstvModeId::Robot36)
         m_robotRy.fill(128, m_mode->width);
+    if (recovery) {
+        emit statusChanged(QStringLiteral("AUTO RX • %1 CANDIDATE • VERIFYING LINE SYNC")
+                               .arg(m_mode->displayName));
+    } else {
+        announceModeIfNeeded();
+        emit statusChanged(QStringLiteral("AUTO RX • %1 • SYNC ACQUIRING • SLANT: AUTO")
+                               .arg(m_mode->displayName));
+    }
+}
+
+void SstvDecoder::announceModeIfNeeded() {
+    if (m_modeAnnounced || !m_mode)
+        return;
+    m_modeAnnounced = true;
     emit modeDetected(static_cast<int>(m_mode->id), m_mode->displayName);
-    emit statusChanged(QStringLiteral("AUTO RX • %1 • SYNC ACQUIRING • SLANT: AUTO").arg(m_mode->displayName));
 }
 
 double SstvDecoder::meanFrequency(qint64 start, qint64 end) const {
@@ -877,6 +1010,62 @@ double SstvDecoder::meanFrequency(qint64 start, qint64 end) const {
     double sum = 0.0;
     for (qint64 i = start; i < end; ++i) sum += m_frequency.at(i);
     return sum / static_cast<double>(end - start);
+}
+
+double SstvDecoder::percentileFrequency(qint64 start, qint64 end,
+                                        double percentile) const {
+    start = qBound<qint64>(0, start, m_frequency.size());
+    end = qBound<qint64>(start, end, m_frequency.size());
+    if (end <= start)
+        return CenterHz;
+
+    QVector<float> values;
+    values.reserve(end - start);
+    for (qint64 i = start; i < end; ++i)
+        values.append(m_frequency.at(i));
+    const qsizetype index = qBound<qsizetype>(
+        0, qRound64(qBound(0.0, percentile, 1.0) * (values.size() - 1)),
+        values.size() - 1);
+    std::nth_element(values.begin(), values.begin() + index, values.end());
+    return values.at(index);
+}
+
+double SstvDecoder::tonePresenceFraction(qint64 start, qint64 end,
+                                         double targetHz, double offsetHz,
+                                         double toleranceHz) const {
+    start = qBound<qint64>(0, start, m_frequency.size());
+    end = qBound<qint64>(start, end, m_frequency.size());
+    if (end <= start)
+        return 0.0;
+    qint64 matching = 0;
+    for (qint64 i = start; i < end; ++i) {
+        if (qAbs(m_frequency.at(i) - offsetHz - targetHz) <= toleranceHz)
+            ++matching;
+    }
+    return static_cast<double>(matching) / static_cast<double>(end - start);
+}
+
+qint64 SstvDecoder::longestToneRun(qint64 start, qint64 end, double targetHz,
+                                   double offsetHz, double toleranceHz,
+                                   qint64 mergeGapSamples) const {
+    start = qBound<qint64>(0, start, m_frequency.size());
+    end = qBound<qint64>(start, end, m_frequency.size());
+    qint64 runStart = -1;
+    qint64 lastMatch = -1;
+    qint64 longest = 0;
+    for (qint64 i = start; i < end; ++i) {
+        const bool matches = qAbs(m_frequency.at(i) - offsetHz - targetHz) <= toleranceHz;
+        if (matches) {
+            if (runStart < 0 || (lastMatch >= 0 && i - lastMatch > mergeGapSamples + 1))
+                runStart = i;
+            lastMatch = i;
+            longest = qMax(longest, lastMatch - runStart + 1);
+        } else if (lastMatch >= 0 && i - lastMatch > mergeGapSamples) {
+            runStart = -1;
+            lastMatch = -1;
+        }
+    }
+    return longest;
 }
 
 double SstvDecoder::medianFrequency(qint64 start, qint64 end) const {
@@ -949,8 +1138,12 @@ void SstvDecoder::processSyncSample(double frequency, qint64 position) {
                                              localMinimum + 0.10 * (localMaximum - localMinimum),
                                              1450.0);
     const double correctedFrequency = medianFrequencyHz - m_tuningOffsetHz;
-    const bool syncTone = correctedFrequency >= 850.0
-                          && correctedFrequency < adaptiveThreshold;
+    const double minimumSyncHz = m_acquisitionKind == AcquisitionKind::SecondLeaderRecovery
+        ? 950.0 : 850.0;
+    const double maximumSyncHz = m_acquisitionKind == AcquisitionKind::SecondLeaderRecovery
+        ? qMax(1450.0, adaptiveThreshold) : adaptiveThreshold;
+    const bool syncTone = correctedFrequency >= minimumSyncHz
+                          && correctedFrequency < maximumSyncHz;
     if (syncTone && !m_inSync) {
         m_inSync = true;
         m_syncStart = filteredPosition;
@@ -963,12 +1156,47 @@ void SstvDecoder::processSyncSample(double frequency, qint64 position) {
 void SstvDecoder::acceptSync(qint64 start, qint64 end) {
     const double nominalWidth = m_mode->lineSyncMs * SampleRate / 1000.0;
     const double width = static_cast<double>(end - start);
-    if (width < nominalWidth * 0.48 || width > nominalWidth * 1.75)
+    const bool recovery = m_acquisitionKind == AcquisitionKind::SecondLeaderRecovery;
+    const double minimumWidth = recovery ? 0.70 : 0.48;
+    const double maximumWidth = recovery ? 1.35 : 1.75;
+    if (width < nominalWidth * minimumWidth || width > nominalWidth * maximumWidth)
         return;
     // Use the pulse center and nominal width to estimate its leading edge.
     // This cancels most threshold-dependent width variation while preserving
     // the mode registry's line-start convention for rendering.
     const qint64 normalizedStart = qRound64(0.5 * (start + end) - 0.5 * nominalWidth);
+    if (!m_acquisitionConfirmed) {
+        if (m_confirmationSyncSample < 0) {
+            m_confirmationSyncSample = normalizedStart;
+            m_confirmationSyncCount = 1;
+            qInfo().nospace() << "SSTV RX line sync candidate "
+                              << qRound(1000.0 * width / SampleRate) << " ms";
+        } else {
+            const double separation = normalizedStart - m_confirmationSyncSample;
+            const int periods = qRound(separation / m_linePeriod);
+            const bool periodic = periods >= 1 && periods <= (recovery ? 1 : 3)
+                                  && qAbs(separation - periods * m_linePeriod)
+                                         <= (recovery ? 0.08 : 0.18) * m_linePeriod;
+            if (periodic) {
+                ++m_confirmationSyncCount;
+                m_confirmationSyncSample = normalizedStart;
+            } else if (separation > 0.35 * m_linePeriod) {
+                m_confirmationSyncCount = 1;
+                m_confirmationSyncSample = normalizedStart;
+            }
+            const int requiredPulses = recovery ? 3 : 2;
+            if (m_confirmationSyncCount >= requiredPulses) {
+                m_acquisitionConfirmed = true;
+                qInfo().nospace() << "SSTV RX line sync confirmed by "
+                                  << m_confirmationSyncCount << " periodic pulses";
+                if (recovery) {
+                    announceModeIfNeeded();
+                    emit statusChanged(QStringLiteral("AUTO RX • %1 • SYNC CONFIRMED • SLANT: AUTO")
+                                           .arg(m_mode->displayName));
+                }
+            }
+        }
+    }
     if (m_firstLineStart < 0) {
         m_firstLineStart = normalizedStart;
         m_syncs.append({0, normalizedStart});

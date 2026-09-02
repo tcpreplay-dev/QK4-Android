@@ -1261,22 +1261,25 @@ void SstvScreen::setupUi() {
     m_modeDetail->setStyleSheet(QStringLiteral("color: #6dd4ef; font-weight: 700;"));
     controls->addWidget(m_modeDetail);
 
-    auto *callsignRow = new QHBoxLayout;
-    callsignRow->setSpacing(4);
+    m_callsignRowLayout = new QHBoxLayout;
+    m_callsignRowLayout->setSpacing(4);
+    m_callsignIdRowContainer = new QWidget(transmitPage);
+    m_callsignIdRowLayout = new QHBoxLayout(m_callsignIdRowContainer);
+    m_callsignIdRowLayout->setContentsMargins(0, 0, 0, 0);
+    m_callsignIdRowLayout->setSpacing(4);
     m_operatorCallsign = sstvSettings.value(QStringLiteral("sstv/operatorCallsign"))
                              .toString().trimmed().toUpper();
     m_callsignEdit = new QLineEdit(m_operatorCallsign, transmitPage);
     m_callsignEdit->setPlaceholderText(QStringLiteral("SET CALLSIGN"));
     m_callsignEdit->setMaxLength(16);
-    // The ID controls are fixed-width so the editable field cannot collapse in
-    // the compact landscape pane. Reserve enough visible text width for a
-    // representative nine-character portable callsign plus the edit padding.
+    // Reserve enough visible text width for a representative nine-character
+    // portable callsign plus the edit padding.
     const int callsignWidth = QFontMetrics(m_callsignEdit->font())
                                   .horizontalAdvance(QStringLiteral("W9WDX/ABC")) + 22;
     m_callsignEdit->setFixedWidth(callsignWidth);
     m_callsignEdit->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     m_callsignEdit->setAccessibleName(QStringLiteral("SSTV operator callsign"));
-    callsignRow->addWidget(m_callsignEdit, 1);
+    m_callsignRowLayout->addWidget(m_callsignEdit, 1);
     m_fskIdCheck = new QCheckBox(QStringLiteral("FSK ID"), transmitPage);
     m_fskIdCheck->setChecked(sstvSettings.value(QStringLiteral("sstv/fskIdEnabled")).toBool());
     m_fskIdCheck->setToolTip(QStringLiteral("Send the MMSSTV-compatible FSK callsign ID after the image"));
@@ -1318,13 +1321,10 @@ void SstvScreen::setupUi() {
     m_cwWpmSpin->setVisible(m_cwIdCheck->isChecked());
     m_cwWpmMinus->setVisible(m_cwIdCheck->isChecked());
     m_cwWpmPlus->setVisible(m_cwIdCheck->isChecked());
-    callsignRow->addWidget(m_fskIdCheck);
-    callsignRow->addWidget(m_cwIdCheck);
-    callsignRow->addWidget(m_cwWpmMinus);
-    callsignRow->addWidget(m_cwWpmSpin);
-    callsignRow->addWidget(m_cwWpmPlus);
     controls->addWidget(new QLabel(QStringLiteral("MY CALL"), transmitPage));
-    controls->addLayout(callsignRow);
+    controls->addLayout(m_callsignRowLayout);
+    controls->addWidget(m_callsignIdRowContainer);
+    updateCallsignControlsLayout(height() > width());
     connect(m_fskIdCheck, &QCheckBox::toggled, this, [this](bool enabled) {
         QSettings settings(QStringLiteral("QK4"), QStringLiteral("QK4"));
         settings.setValue(QStringLiteral("sstv/fskIdEnabled"), enabled);
@@ -3979,6 +3979,55 @@ void SstvScreen::cancelTransmitConfirmation() {
     updateTransmitUi();
 }
 
+void SstvScreen::updateCallsignControlsLayout(bool portrait) {
+    if (!m_callsignRowLayout || !m_callsignIdRowLayout || !m_callsignIdRowContainer
+        || !m_callsignEdit || !m_fskIdCheck || !m_cwIdCheck || !m_cwWpmMinus
+        || !m_cwWpmSpin || !m_cwWpmPlus) {
+        return;
+    }
+
+    const int requestedOrientation = portrait ? 1 : 0;
+    if (m_callsignControlsPortrait == requestedOrientation)
+        return;
+
+    for (QWidget *widget : {static_cast<QWidget *>(m_callsignEdit),
+                            static_cast<QWidget *>(m_fskIdCheck),
+                            static_cast<QWidget *>(m_cwIdCheck),
+                            static_cast<QWidget *>(m_cwWpmMinus),
+                            static_cast<QWidget *>(m_cwWpmSpin),
+                            static_cast<QWidget *>(m_cwWpmPlus)}) {
+        m_callsignRowLayout->removeWidget(widget);
+        m_callsignIdRowLayout->removeWidget(widget);
+    }
+
+    if (portrait) {
+        // Preserve the original portrait presentation: callsign, ID options,
+        // and CW speed remain together on one line.
+        m_callsignRowLayout->addWidget(m_callsignEdit, 1);
+        m_callsignRowLayout->addWidget(m_fskIdCheck);
+        m_callsignRowLayout->addWidget(m_cwIdCheck);
+        m_callsignRowLayout->addWidget(m_cwWpmMinus);
+        m_callsignRowLayout->addWidget(m_cwWpmSpin);
+        m_callsignRowLayout->addWidget(m_cwWpmPlus);
+        m_callsignIdRowContainer->hide();
+    } else {
+        // The landscape controls pane is narrower. Keep MY CALL unobstructed
+        // and place both ID options and the complete speed control below it.
+        m_callsignRowLayout->addWidget(
+            m_callsignEdit, 0, Qt::AlignLeft | Qt::AlignVCenter);
+        m_callsignIdRowLayout->addWidget(m_fskIdCheck);
+        m_callsignIdRowLayout->addWidget(m_cwIdCheck);
+        m_callsignIdRowLayout->addWidget(m_cwWpmMinus);
+        m_callsignIdRowLayout->addWidget(m_cwWpmSpin);
+        m_callsignIdRowLayout->addWidget(m_cwWpmPlus);
+        m_callsignIdRowContainer->show();
+    }
+
+    m_callsignControlsPortrait = requestedOrientation;
+    m_callsignRowLayout->invalidate();
+    m_callsignIdRowLayout->invalidate();
+}
+
 void SstvScreen::resizeEvent(QResizeEvent *event) {
     QWidget::resizeEvent(event);
     if (!m_transmitLayout)
@@ -3988,6 +4037,7 @@ void SstvScreen::resizeEvent(QResizeEvent *event) {
     m_transmitLayout->setDirection(portrait ? QBoxLayout::TopToBottom : QBoxLayout::LeftToRight);
     m_transmitLayout->setStretch(0, portrait ? 4 : 3);
     m_transmitLayout->setStretch(1, portrait ? 3 : 2);
+    updateCallsignControlsLayout(portrait);
     if (!m_currentReceiveImage.isNull())
         m_receiveImage->setPixmap(QPixmap::fromImage(m_currentReceiveImage).scaled(
             m_receiveImage->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
