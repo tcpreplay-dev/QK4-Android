@@ -92,6 +92,10 @@ multi-function control: a button assigned to an **Adjust:** action selects the
 function, opens the corresponding QK4 adjustment control when one exists, and
 the knob then changes that setting.
 
+See [CTR2-MIDI on-screen controls and feedback](docs/CTR2_UI_ACTIONS.md) for
+the complete list of adjustment surfaces, operating-display updates, and
+immediate button actions.
+
 ![QK4 Mobile CTR2 knob-mode mappings](./docs/images/QK4-Mobile-v1.0.4-CTR2-Knob-Mapping.png)
 
 ### CTR2 buttons and mapping files
