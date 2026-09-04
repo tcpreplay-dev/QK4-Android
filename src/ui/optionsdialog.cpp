@@ -3,9 +3,12 @@
 #include "micmeterwidget.h"
 #include "inwindowdialog.h"
 #include "fnpopupwidget.h"
+#include "ctr2mappingeditor.h"
 #include "../models/radiostate.h"
 #include "../hardware/kpoddevice.h"
 #include "../hardware/halikeydevice.h"
+#include "../hardware/ctr2mididevice.h"
+#include "../settings/fnkeymemory.h"
 #include "../settings/radiosettings.h"
 #include "../network/catserver.h"
 #include "../audio/audioengine.h"
@@ -17,6 +20,8 @@
 #include <QScrollBar>
 #include <QStringList>
 #include <QCheckBox>
+#include <QFile>
+#include <QFileDialog>
 #include <QGridLayout>
 #include <QComboBox>
 #include <QSlider>
@@ -24,20 +29,32 @@
 #include <QApplication>
 #include <QSignalBlocker>
 #include <QPointer>
+#include <QJsonDocument>
+#include <QJsonParseError>
+#include <QSaveFile>
 #include <QScroller>
 #include <QScrollerProperties>
 #include <QMouseEvent>
 #include <QStyle>
+#include <QStandardPaths>
 #ifdef Q_OS_ANDROID
 #include <QPermissions>
 #endif
 
 // Use K4Styles::Colors::DialogBorder for dialog-specific borders
 
+namespace {
+QString fnFunctionId(const QString &key) {
+    return QStringLiteral("Fn.") + key;
+}
+} // namespace
+
 OptionsDialog::OptionsDialog(RadioState *radioState, AudioEngine *audioEngine, KpodDevice *kpodDevice,
-                             CatServer *catServer, HalikeyDevice *halikeyDevice, QWidget *parent)
+                             CatServer *catServer, HalikeyDevice *halikeyDevice,
+                             Ctr2MidiDevice *ctr2MidiDevice, QWidget *parent)
     : OptionsDialogBase(parent), m_radioState(radioState), m_audioEngine(audioEngine), m_kpodDevice(kpodDevice),
-      m_catServer(catServer), m_halikeyDevice(halikeyDevice), m_micDeviceCombo(nullptr), m_micGainSlider(nullptr),
+      m_catServer(catServer), m_halikeyDevice(halikeyDevice), m_ctr2MidiDevice(ctr2MidiDevice),
+      m_micDeviceCombo(nullptr), m_micGainSlider(nullptr),
       m_micGainValueLabel(nullptr), m_micTestBtn(nullptr), m_micMeter(nullptr), m_speakerDeviceCombo(nullptr),
       m_catServerEnableCheckbox(nullptr), m_catServerPortEdit(nullptr), m_catServerStatusLabel(nullptr),
       m_catServerClientsLabel(nullptr), m_cwKeyerDeviceTypeCombo(nullptr), m_cwKeyerDescLabel(nullptr),
@@ -69,6 +86,8 @@ OptionsDialog::OptionsDialog(RadioState *radioState, AudioEngine *audioEngine, K
     if (m_halikeyDevice) {
         connect(m_halikeyDevice, &HalikeyDevice::connected, this, &OptionsDialog::updateCwKeyerStatus);
         connect(m_halikeyDevice, &HalikeyDevice::disconnected, this, &OptionsDialog::updateCwKeyerStatus);
+        connect(m_halikeyDevice, &HalikeyDevice::connectionError, this,
+                [this](const QString &) { updateCwKeyerStatus(); });
     }
 }
 
@@ -112,7 +131,7 @@ void OptionsDialog::setupUi() {
     auto *close = new QPushButton("RETURN TO OPERATE", this);
     close->setMinimumHeight(30);
     close->setStyleSheet(K4Styles::menuBarButton());
-    connect(close, &QPushButton::clicked, this, &QWidget::hide);
+    connect(close, &QPushButton::clicked, this, &OptionsDialog::requestReturnToOperate);
     header->addWidget(title);
     header->addStretch(1);
     header->addWidget(close);
@@ -133,11 +152,12 @@ void OptionsDialog::setupUi() {
     m_tabList->addItem("Audio Output");
     m_tabList->addItem("Rig Control");
     m_tabList->addItem("CW Keyer");
+    m_tabList->addItem("CTR2");
     m_tabList->addItem("K-Pod");
     m_tabList->addItem("Fn Key Setup");
 #ifdef Q_OS_ANDROID
-    // The phone settings surface intentionally contains only app information
-    // and the controls needed for the external BLE MIDI CW keyer.
+    // The phone settings surface intentionally contains app information plus
+    // the independent CW Keyer and CTR2-MIDI device/setup roles.
     for (Page hiddenPage : {PageAudioInput, PageAudioOutput, PageRigControl, PageKpod})
         m_tabList->item(hiddenPage)->setHidden(true);
 #endif
@@ -178,6 +198,9 @@ void OptionsDialog::ensurePageCreated(int index) {
     case PageCwKeyer:
         page = createCwKeyerPage();
         break;
+    case PageCtr2Midi:
+        page = createCtr2MidiPage();
+        break;
     case PageKpod:
         page = createKpodPage();
         break;
@@ -196,6 +219,69 @@ void OptionsDialog::ensurePageCreated(int index) {
     m_pageCreated[index] = true;
 }
 
+QWidget *OptionsDialog::createCtr2MidiPage() {
+    auto *page = new QWidget(this);
+    page->setStyleSheet(QString("background-color: %1;").arg(K4Styles::Colors::Background));
+    auto *layout = new QVBoxLayout(page);
+    layout->setContentsMargins(K4Styles::Dimensions::DialogMargin,
+                               K4Styles::Dimensions::PaddingSmall,
+                               K4Styles::Dimensions::DialogMargin,
+                               K4Styles::Dimensions::PaddingSmall);
+    m_ctr2MappingEditor = new Ctr2MappingEditor(m_ctr2MidiDevice, page);
+    layout->addWidget(m_ctr2MappingEditor);
+    return page;
+}
+
+void OptionsDialog::requestReturnToOperate() {
+    if (!m_ctr2MappingEditor || !m_ctr2MappingEditor->hasUnsavedChanges()) {
+        hide();
+        return;
+    }
+
+    InWindowDialog dialog(this);
+    QWidget *panel = dialog.contentWidget();
+    auto *layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(14, 12, 14, 12);
+
+    auto *title = new QLabel("Unsaved CTR2 mapping", panel);
+    title->setAlignment(Qt::AlignCenter);
+    title->setStyleSheet(QString("color:%1;font-size:%2px;font-weight:bold;")
+                             .arg(K4Styles::Colors::AccentAmber)
+                             .arg(K4Styles::Dimensions::FontSizeTitle));
+    layout->addWidget(title);
+
+    auto *message = new QLabel(
+        "The CTR2 mapping has changes that have not been applied. Apply them before returning to operate?",
+        panel);
+    message->setWordWrap(true);
+    layout->addWidget(message);
+
+    auto *buttons = new QHBoxLayout;
+    auto *cancel = new QPushButton("CANCEL", panel);
+    auto *abandon = new QPushButton("ABANDON", panel);
+    auto *apply = new QPushButton("APPLY", panel);
+    for (auto *button : {cancel, abandon, apply}) {
+        button->setMinimumHeight(42);
+        button->setStyleSheet(K4Styles::menuBarButton());
+        buttons->addWidget(button);
+    }
+    layout->addLayout(buttons);
+
+    connect(cancel, &QPushButton::clicked, &dialog, &InWindowDialog::reject);
+    connect(abandon, &QPushButton::clicked, &dialog, [&dialog]() { dialog.done(2); });
+    connect(apply, &QPushButton::clicked, &dialog, [&dialog]() { dialog.done(3); });
+    dialog.setPanelSize(QSize(qMin(650, width() - 20), 220));
+
+    const int result = dialog.exec();
+    if (result == 3) {
+        if (m_ctr2MappingEditor->applyChanges())
+            hide();
+    } else if (result == 2) {
+        m_ctr2MappingEditor->abandonChanges();
+        hide();
+    }
+}
+
 QWidget *OptionsDialog::createFnKeySetupPage() {
     auto *page = new QWidget(this);
     page->setStyleSheet(QString("background-color: %1;").arg(K4Styles::Colors::Background));
@@ -209,15 +295,35 @@ QWidget *OptionsDialog::createFnKeySetupPage() {
     title->setStyleSheet(QString("color: %1; font-size: %2px; font-weight: bold;")
                              .arg(K4Styles::Colors::AccentAmber)
                              .arg(K4Styles::Dimensions::FontSizeTitle));
-    auto *saveStatus = new QLabel("Changes save automatically", page);
-    saveStatus->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
-    saveStatus->setStyleSheet(QString("color: %1; font-size: %2px; font-style: italic;")
-                                  .arg(K4Styles::Colors::TextGray)
-                                  .arg(K4Styles::Dimensions::FontSizeLarge));
+    m_fnKeySaveStatus = new QLabel("Changes save automatically", page);
+    m_fnKeySaveStatus->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+    m_fnKeySaveStatus->setStyleSheet(QString("color: %1; font-size: %2px; font-style: italic;")
+                                         .arg(K4Styles::Colors::TextGray)
+                                         .arg(K4Styles::Dimensions::FontSizeLarge));
     titleRow->addWidget(title);
     titleRow->addStretch();
-    titleRow->addWidget(saveStatus);
+    titleRow->addWidget(m_fnKeySaveStatus);
     layout->addLayout(titleRow);
+
+    auto *fileActions = new QHBoxLayout();
+    fileActions->setSpacing(6);
+    auto *loadFile = new QPushButton("LOAD FILE", page);
+    auto *saveFile = new QPushButton("SAVE FILE", page);
+    for (auto *button : {loadFile, saveFile}) {
+        button->setMinimumHeight(42);
+        button->setStyleSheet(K4Styles::menuBarButton());
+        fileActions->addWidget(button);
+    }
+    auto *fileHelp = new QLabel("Loading replaces all eight FN key assignments; files are never merged.", page);
+    fileHelp->setWordWrap(true);
+    fileHelp->setStyleSheet(QString("color: %1; font-size: %2px;")
+                                .arg(K4Styles::Colors::TextGray)
+                                .arg(K4Styles::Dimensions::FontSizeLarge));
+    fileActions->addWidget(fileHelp, 1);
+    layout->addLayout(fileActions);
+    connect(loadFile, &QPushButton::clicked, this, &OptionsDialog::loadFnKeyFile);
+    connect(saveFile, &QPushButton::clicked, this, [this]() { saveFnKeyFile(); });
+
     auto *columnHeader = new QWidget(page);
     auto *headerLayout = new QHBoxLayout(columnHeader);
     headerLayout->setContentsMargins(12, 0, 12, 0);
@@ -276,13 +382,8 @@ QWidget *OptionsDialog::createFnKeySetupPage() {
         rowLayout->addWidget(function, 1);
         rowLayout->addWidget(labelEdit, 1);
         rowLayout->addWidget(commandEdit, 1);
-        const auto saveRow = [id = slot.first, labelEdit, commandEdit, saveStatus]() {
-            RadioSettings::instance()->setMacro(id, labelEdit->text().trimmed(), commandEdit->text().trimmed());
-            saveStatus->setText("Saved");
-            saveStatus->setStyleSheet(QString("color: %1; font-size: %2px; font-weight: bold;")
-                                          .arg(K4Styles::Colors::AccentAmber)
-                                          .arg(K4Styles::Dimensions::FontSizeLarge));
-        };
+        m_fnKeyEditors.insert(slot.first, FnKeyEditors{labelEdit, commandEdit});
+        const auto saveRow = [this, id = slot.first]() { saveFnKeyEditor(id); };
         connect(labelEdit, &QLineEdit::editingFinished, row, saveRow);
         connect(commandEdit, &QLineEdit::editingFinished, row, saveRow);
         rowsLayout->addWidget(row);
@@ -301,6 +402,154 @@ QWidget *OptionsDialog::createFnKeySetupPage() {
     }
 #endif
     return page;
+}
+
+void OptionsDialog::saveFnKeyEditor(const QString &functionId) {
+    if (m_loadingFnKeyFile)
+        return;
+    const auto editors = m_fnKeyEditors.constFind(functionId);
+    if (editors == m_fnKeyEditors.cend() || !editors->label || !editors->command)
+        return;
+    RadioSettings::instance()->setMacro(functionId, editors->label->text().trimmed(),
+                                        editors->command->text().trimmed());
+    if (m_fnKeySaveStatus) {
+        m_fnKeySaveStatus->setText("Saved");
+        m_fnKeySaveStatus->setStyleSheet(QString("color: %1; font-size: %2px; font-weight: bold;")
+                                             .arg(K4Styles::Colors::AccentAmber)
+                                             .arg(K4Styles::Dimensions::FontSizeLarge));
+    }
+}
+
+void OptionsDialog::persistFnKeyEditors() {
+    for (auto it = m_fnKeyEditors.cbegin(); it != m_fnKeyEditors.cend(); ++it)
+        saveFnKeyEditor(it.key());
+}
+
+void OptionsDialog::refreshFnKeyEditors() {
+    m_loadingFnKeyFile = true;
+    for (auto it = m_fnKeyEditors.cbegin(); it != m_fnKeyEditors.cend(); ++it) {
+        if (!it->label || !it->command)
+            continue;
+        const MacroEntry macro = RadioSettings::instance()->macro(it.key());
+        const QSignalBlocker labelBlocker(it->label);
+        const QSignalBlocker commandBlocker(it->command);
+        it->label->setText(macro.label);
+        it->command->setText(macro.command);
+    }
+    m_loadingFnKeyFile = false;
+}
+
+void OptionsDialog::loadFnKeyFile() {
+    // FN setup edits are auto-saved. Commit any active editor before opening
+    // the picker so there is never an untracked draft requiring a warning.
+    persistFnKeyEditors();
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Load FN key setup"),
+        QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation),
+        QStringLiteral("QK4 FN key setup (*.qk4fnmap *.json);;All files (*)"));
+    if (path.isEmpty())
+        return;
+
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly)) {
+        showInWindowMessage(this, QStringLiteral("FN Key Setup"),
+                            QStringLiteral("The selected FN key file could not be opened."));
+        return;
+    }
+    const QByteArray fileData = file.readAll();
+    if (fileData.size() > 64 * 1024) {
+        showInWindowMessage(this, QStringLiteral("FN Key Setup"),
+                            QStringLiteral("The selected file is too large to be an FN key setup."));
+        return;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument document = QJsonDocument::fromJson(fileData, &parseError);
+    FnKeyMemory::Setup imported;
+    QString error;
+    if (parseError.error != QJsonParseError::NoError || !document.isObject()
+        || !FnKeyMemory::fromJson(document.object(), &imported, &error)) {
+        showInWindowMessage(this, QStringLiteral("FN Key Setup"),
+                            error.isEmpty() ? QStringLiteral("This is not a valid QK4 FN key file.")
+                                            : error);
+        return;
+    }
+
+    // Replace only Fn.F1 through Fn.F8. PF, keyboard, K-Pod, and other macro
+    // assignments remain untouched, and an imported file is never merged with
+    // the previous FN bank.
+    QMap<QString, MacroEntry> macros = RadioSettings::instance()->macros();
+    for (const QString &key : FnKeyMemory::keyNames()) {
+        const QString functionId = fnFunctionId(key);
+        macros.remove(functionId);
+        const FnKeyMemory::Entry entry = imported.keys.value(key);
+        if (!entry.command.isEmpty())
+            macros.insert(functionId, MacroEntry{functionId, entry.label, entry.command});
+    }
+    RadioSettings::instance()->replaceMacros(macros);
+    m_fnKeyMemoryName = imported.name;
+    refreshFnKeyEditors();
+    if (m_fnKeySaveStatus)
+        m_fnKeySaveStatus->setText("Loaded from file");
+    showInWindowMessage(this, QStringLiteral("FN Key Setup"),
+                        QStringLiteral("FN key file loaded. All eight FN assignments were replaced."));
+}
+
+bool OptionsDialog::saveFnKeyFile() {
+    persistFnKeyEditors();
+
+    FnKeyMemory::Setup setup;
+    setup.name = m_fnKeyMemoryName;
+    for (const QString &key : FnKeyMemory::keyNames()) {
+        const MacroEntry macro = RadioSettings::instance()->macro(fnFunctionId(key));
+        setup.keys.insert(key, FnKeyMemory::Entry{macro.label, macro.command});
+    }
+    QString error;
+    if (!FnKeyMemory::validate(setup, &error)) {
+        showInWindowMessage(this, QStringLiteral("FN Key Setup"), error);
+        return false;
+    }
+
+    const QString path = QFileDialog::getSaveFileName(
+        this, QStringLiteral("Save FN key setup"),
+        QStandardPaths::writableLocation(QStandardPaths::DocumentsLocation)
+            + QStringLiteral("/QK4-FN-Keys.qk4fnmap"),
+        QStringLiteral("QK4 FN key setup (*.qk4fnmap)"));
+    if (path.isEmpty())
+        return false;
+
+    const QByteArray fileData =
+        QJsonDocument(FnKeyMemory::toJson(setup)).toJson(QJsonDocument::Indented);
+#ifdef Q_OS_ANDROID
+    // Android's document picker may return a content URI. QFile supports that
+    // URI through Qt's Android file engine; QSaveFile's rename commit does not.
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)
+        || file.write(fileData) != fileData.size()) {
+        showInWindowMessage(this, QStringLiteral("FN Key Setup"),
+                            QStringLiteral("The FN key file could not be saved."));
+        return false;
+    }
+    file.close();
+#else
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        showInWindowMessage(this, QStringLiteral("FN Key Setup"),
+                            QStringLiteral("The FN key file could not be created."));
+        return false;
+    }
+    if (file.write(fileData) != fileData.size() || !file.commit()) {
+        showInWindowMessage(this, QStringLiteral("FN Key Setup"),
+                            QStringLiteral("The FN key file could not be saved."));
+        return false;
+    }
+#endif
+
+    if (m_fnKeySaveStatus)
+        m_fnKeySaveStatus->setText("File saved");
+    showInWindowMessage(this, QStringLiteral("FN Key Setup"),
+                        QStringLiteral("FN key file saved."));
+    return true;
 }
 
 void OptionsDialog::showEvent(QShowEvent *event) {
@@ -410,6 +659,9 @@ void OptionsDialog::refreshPage(int index) {
         break;
     case PageKpod:
         updateKpodStatus();
+        break;
+    case PageFnKeySetup:
+        refreshFnKeyEditors();
         break;
     case PageAbout:
     default:
@@ -1499,6 +1751,68 @@ QWidget *OptionsDialog::createCwKeyerPage() {
     learnLayout->addStretch(1);
     controlsLayout->addLayout(learnLayout);
 
+    // Add straight-key/external-keyer support without replacing any part of
+    // the proven profile/learn controls. These are two-state touch buttons,
+    // avoiding another native combo popup on Android.
+    auto *keyingLayout = new QHBoxLayout();
+    keyingLayout->setSpacing(6);
+    auto *keyingTitle = new QLabel("Key input:", page);
+    keyingTitle->setFixedWidth(135);
+    keyingTitle->setStyleSheet(QString("color:%1;font-size:%2px;")
+                                   .arg(K4Styles::Colors::TextGray)
+                                   .arg(K4Styles::Dimensions::FontSizePopup));
+    auto *keyingModeButton = new QPushButton(page);
+    auto *straightInputButton = new QPushButton(page);
+    for (QPushButton *button : {keyingModeButton, straightInputButton}) {
+        button->setMinimumHeight(38);
+        button->setStyleSheet(K4Styles::menuBarButton());
+    }
+    keyingModeButton->setMinimumWidth(190);
+    straightInputButton->setMinimumWidth(170);
+    const auto updateKeyingButtons = [keyingModeButton, straightInputButton]() {
+        auto *settings = RadioSettings::instance();
+        const bool straight = settings->cwMidiKeyingMode() == 1;
+        keyingModeButton->setText(straight ? "STRAIGHT KEY / KEYER" : "IAMBIC PADDLES");
+        straightInputButton->setText(settings->cwMidiStraightKeyInput() == 0
+                                         ? "KEY = LEFT / TIP" : "KEY = RIGHT / RING");
+        straightInputButton->setVisible(straight);
+        keyingModeButton->setStyleSheet(straight ? K4Styles::menuBarButtonActive()
+                                                 : K4Styles::menuBarButton());
+    };
+    updateKeyingButtons();
+    connect(keyingModeButton, &QPushButton::clicked, this,
+            [this, updateKeyingButtons]() {
+        // Disconnect first so a held paddle cannot remain logically down
+        // while the meaning of its physical input changes.
+        if (m_halikeyDevice && m_halikeyDevice->isConnected())
+            m_halikeyDevice->closePort();
+        auto *settings = RadioSettings::instance();
+        settings->setCwMidiKeyingMode(settings->cwMidiKeyingMode() == 0 ? 1 : 0);
+        updateKeyingButtons();
+    });
+    connect(straightInputButton, &QPushButton::clicked, this,
+            [this, updateKeyingButtons]() {
+        if (m_halikeyDevice && m_halikeyDevice->isConnected())
+            m_halikeyDevice->closePort();
+        auto *settings = RadioSettings::instance();
+        settings->setCwMidiStraightKeyInput(settings->cwMidiStraightKeyInput() == 0 ? 1 : 0);
+        updateKeyingButtons();
+    });
+    keyingLayout->addWidget(keyingTitle);
+    keyingLayout->addWidget(keyingModeButton);
+    keyingLayout->addWidget(straightInputButton);
+    keyingLayout->addStretch(1);
+    controlsLayout->addLayout(keyingLayout);
+
+    auto *keyingHelp = new QLabel(
+        "Straight key / external keyer preserves key-down and key-up timing. "
+        "Changing key mode disconnects the CW MIDI device; reconnect after changing it.", page);
+    keyingHelp->setWordWrap(true);
+    keyingHelp->setStyleSheet(QString("color:%1;font-size:%2px;font-style:italic;")
+                                  .arg(K4Styles::Colors::TextGray)
+                                  .arg(K4Styles::Dimensions::FontSizeLarge));
+    controlsLayout->addWidget(keyingHelp);
+
     const auto updateMidiProfileControls = [this, tinyMidiProfileButton, haliKeyProfileButton,
                                             customProfileButton]() {
         const int profile = m_midiMappingProfileCombo->currentData().toInt();
@@ -1636,6 +1950,24 @@ QWidget *OptionsDialog::createCwKeyerPage() {
     };
     setInputIndicator(ditIndicator, false);
     setInputIndicator(dahIndicator, false);
+    const auto updateInputLabels = [ditIndicator, dahIndicator]() {
+        const auto *settings = RadioSettings::instance();
+        if (settings->cwMidiKeyingMode() == 0) {
+            ditIndicator->setText("DIT");
+            dahIndicator->setText("DAH");
+        } else if (settings->cwMidiStraightKeyInput() == 0) {
+            ditIndicator->setText("KEY");
+            dahIndicator->setText("UNUSED");
+        } else {
+            ditIndicator->setText("UNUSED");
+            dahIndicator->setText("KEY");
+        }
+    };
+    updateInputLabels();
+    connect(RadioSettings::instance(), &RadioSettings::cwMidiKeyingModeChanged,
+            page, [updateInputLabels](int) { updateInputLabels(); });
+    connect(RadioSettings::instance(), &RadioSettings::cwMidiStraightKeyInputChanged,
+            page, [updateInputLabels](int) { updateInputLabels(); });
     inputTestTitle->setFixedWidth(135);
     inputTestLayout->addWidget(inputTestTitle);
     inputTestLayout->addWidget(ditIndicator);
@@ -1675,6 +2007,12 @@ QWidget *OptionsDialog::createCwKeyerPage() {
                 [ditIndicator, dahIndicator, setInputIndicator](bool pressed) {
                     setInputIndicator(RadioSettings::instance()->cwPaddlesReversed() ? ditIndicator : dahIndicator,
                                       pressed);
+                });
+        connect(m_halikeyDevice, &HalikeyDevice::straightKeyStateChanged, page,
+                [ditIndicator, dahIndicator, setInputIndicator](bool pressed) {
+                    QLabel *indicator = RadioSettings::instance()->cwMidiStraightKeyInput() == 0
+                                            ? ditIndicator : dahIndicator;
+                    setInputIndicator(indicator, pressed);
                 });
         connect(m_halikeyDevice, &HalikeyDevice::disconnected, page, [=]() {
             setInputIndicator(ditIndicator, false);

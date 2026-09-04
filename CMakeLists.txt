@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(QK4 VERSION 1.0.3 LANGUAGES CXX)
+project(QK4 VERSION 1.0.4 LANGUAGES CXX)
 include(CTest)
 
 # Optional override paths for Opus when cross-compiling (primarily Android)
@@ -169,8 +169,12 @@ set(SOURCES
     src/android/sstvorientation.cpp
     src/android/sstvmedia.cpp
     src/hardware/iambickeyer.cpp
+    src/hardware/midimapping.cpp
+    src/hardware/midiinputrouter.cpp
+    src/hardware/ctr2mididevice.cpp
     src/dsp/panadapter_rhi.cpp
     src/dsp/minipan_rhi.cpp
+    src/settings/fnkeymemory.cpp
     src/settings/radiosettings.cpp
     src/models/radiostate.cpp
     src/models/menumodel.cpp
@@ -189,6 +193,7 @@ set(SOURCES
     src/ui/buttonrowpopup.cpp
     src/ui/displaypopupwidget.cpp
     src/ui/optionsdialog.cpp
+    src/ui/ctr2mappingeditor.cpp
     src/ui/inwindowdialog.cpp
     src/ui/rightsidepanel.cpp
     src/ui/featuremenubar.cpp
@@ -258,8 +263,12 @@ set(HEADERS
     src/android/sstvorientation.h
     src/android/sstvmedia.h
     src/hardware/iambickeyer.h
+    src/hardware/midimapping.h
+    src/hardware/midiinputrouter.h
+    src/hardware/ctr2mididevice.h
     src/dsp/panadapter_rhi.h
     src/dsp/minipan_rhi.h
+    src/settings/fnkeymemory.h
     src/settings/radiosettings.h
     src/models/radiostate.h
     src/models/menumodel.h
@@ -278,6 +287,7 @@ set(HEADERS
     src/ui/buttonrowpopup.h
     src/ui/displaypopupwidget.h
     src/ui/optionsdialog.h
+    src/ui/ctr2mappingeditor.h
     src/ui/rightsidepanel.h
     src/ui/featuremenubar.h
     src/ui/modepopupwidget.h
@@ -626,6 +636,17 @@ if(BUILD_TESTING AND NOT ANDROID)
     target_include_directories(test_radiostate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_radiostate PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME radiostate COMMAND test_radiostate)
+
+    qt_add_executable(test_midimapping
+        tests/test_midimapping.cpp
+        src/hardware/midimapping.cpp
+        src/hardware/midimapping.h
+        src/hardware/midiinputrouter.cpp
+        src/hardware/midiinputrouter.h
+    )
+    target_include_directories(test_midimapping PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+    target_link_libraries(test_midimapping PRIVATE Qt6::Core Qt6::Test)
+    add_test(NAME midimapping COMMAND test_midimapping)
 
     qt_add_executable(test_modepopupwidget
         tests/test_modepopupwidget.cpp

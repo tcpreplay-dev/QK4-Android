@@ -27,13 +27,13 @@ HalikeyDevice::HalikeyDevice(QObject *parent) : QObject(parent) {
     connect(m_ditDebounceTimer, &QTimer::timeout, this, [this]() {
         if (m_rawDitState != m_confirmedDitState) {
             m_confirmedDitState = m_rawDitState;
-            emit ditStateChanged(m_confirmedDitState);
+            emitMappedPaddle(true, m_confirmedDitState);
         }
     });
     connect(m_dahDebounceTimer, &QTimer::timeout, this, [this]() {
         if (m_rawDahState != m_confirmedDahState) {
             m_confirmedDahState = m_rawDahState;
-            emit dahStateChanged(m_confirmedDahState);
+            emitMappedPaddle(false, m_confirmedDahState);
         }
     });
     connect(m_pttDebounceTimer, &QTimer::timeout, this, [this]() {
@@ -118,7 +118,7 @@ void HalikeyDevice::onRawDit(bool pressed) {
     if (pressed && !m_confirmedDitState) {
         m_confirmedDitState = true;
         m_ditDebounceTimer->stop();
-        emit ditStateChanged(true);
+        emitMappedPaddle(true, true);
     } else {
         m_ditDebounceTimer->start();
     }
@@ -129,7 +129,7 @@ void HalikeyDevice::onRawDah(bool pressed) {
     if (pressed && !m_confirmedDahState) {
         m_confirmedDahState = true;
         m_dahDebounceTimer->stop();
-        emit dahStateChanged(true);
+        emitMappedPaddle(false, true);
     } else {
         m_dahDebounceTimer->start();
     }
@@ -238,7 +238,7 @@ HalikeyDevice::HalikeyDevice(QObject *parent) : QObject(parent) {
     connect(m_ditDebounceTimer, &QTimer::timeout, this, [this]() {
         if (m_rawDitState != m_confirmedDitState) {
             m_confirmedDitState = m_rawDitState;
-            emit ditStateChanged(m_confirmedDitState);
+            emitMappedPaddle(true, m_confirmedDitState);
         }
     });
 
@@ -248,7 +248,7 @@ HalikeyDevice::HalikeyDevice(QObject *parent) : QObject(parent) {
     connect(m_dahDebounceTimer, &QTimer::timeout, this, [this]() {
         if (m_rawDahState != m_confirmedDahState) {
             m_confirmedDahState = m_rawDahState;
-            emit dahStateChanged(m_confirmedDahState);
+            emitMappedPaddle(false, m_confirmedDahState);
         }
     });
 
@@ -273,7 +273,7 @@ void HalikeyDevice::onRawDit(bool pressed) {
         // Key down — emit immediately for zero latency
         m_confirmedDitState = true;
         m_ditDebounceTimer->stop();
-        emit ditStateChanged(true);
+        emitMappedPaddle(true, true);
     } else {
         // Key up or redundant key down — debounce
         m_ditDebounceTimer->start();
@@ -285,7 +285,7 @@ void HalikeyDevice::onRawDah(bool pressed) {
     if (pressed && !m_confirmedDahState) {
         m_confirmedDahState = true;
         m_dahDebounceTimer->stop();
-        emit dahStateChanged(true);
+        emitMappedPaddle(false, true);
     } else {
         m_dahDebounceTimer->start();
     }
@@ -456,3 +456,18 @@ bool HalikeyDevice::dahPressed() const {
 }
 
 #endif
+
+void HalikeyDevice::emitMappedPaddle(bool physicalLeft, bool pressed) {
+    const RadioSettings *settings = RadioSettings::instance();
+    if (settings->cwMidiKeyingMode() == 0) {
+        if (physicalLeft)
+            emit ditStateChanged(pressed);
+        else
+            emit dahStateChanged(pressed);
+        return;
+    }
+
+    const bool selectedLeft = settings->cwMidiStraightKeyInput() == 0;
+    if (physicalLeft == selectedLeft)
+        emit straightKeyStateChanged(pressed);
+}

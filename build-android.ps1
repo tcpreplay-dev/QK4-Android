@@ -258,7 +258,12 @@ if ($LASTEXITCODE -ne 0 -and $DeploymentType -ne "Release") {
 }
 
 if ($DeploymentType -eq "Release") {
-    $unsignedApk = Get-ChildItem $packageDir -Filter "*-release-unsigned.apk" -Recurse |
+    # Limit discovery to Gradle's stable APK output tree. Recursing through the
+    # entire package directory can race transient desugar/intermediate folders
+    # that Gradle removes immediately after assembleRelease completes.
+    $releaseApkOutput = Join-Path $packageDir "build\outputs\apk"
+    $unsignedApk = Get-ChildItem -LiteralPath $releaseApkOutput `
+        -Filter "*-release-unsigned.apk" -File -Recurse -ErrorAction SilentlyContinue |
         Sort-Object LastWriteTime -Descending |
         Select-Object -First 1
     if (-not $unsignedApk) {
@@ -289,10 +294,18 @@ if ($DeploymentType -eq "Release") {
     }
 }
 
-$apk = Get-ChildItem $packageDir -Filter "*.apk" -Recurse |
-    Where-Object { $_.Name -notlike "*-unsigned.apk" -and $_.Name -notlike "*-aligned.apk" } |
-    Sort-Object LastWriteTime -Descending |
-    Select-Object -First 1
+$apk = if ($DeploymentType -eq "Release") {
+    Get-Item -LiteralPath $signedApk -ErrorAction SilentlyContinue
+} else {
+    # Gradle removes transient desugar directories while packaging. Search its
+    # stable APK output tree instead of recursing through every intermediate.
+    $debugApkOutput = Join-Path $packageDir "build\outputs\apk"
+    Get-ChildItem -LiteralPath $debugApkOutput -Filter "*.apk" -File -Recurse `
+        -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -notlike "*-unsigned.apk" -and $_.Name -notlike "*-aligned.apk" } |
+        Sort-Object LastWriteTime -Descending |
+        Select-Object -First 1
+}
 
 if (-not $apk) {
     throw "The APK target completed but no APK was produced under $packageDir."

@@ -1354,6 +1354,14 @@ void DisplayPopupWidget::setWaterfallHeightExt(int percent) {
     }
 }
 
+void DisplayPopupWidget::setWaterfallColorRange(int range) {
+    m_waterfallColorRange = qBound(5, range, 30);
+    if (m_waterfallColorRangeControlGroup)
+        m_waterfallColorRangeControlGroup->setValue(QString::number(m_waterfallColorRange));
+    if (m_menuButtons.size() > 1 && m_menuButtons[1])
+        m_menuButtons[1]->setAlternateText(QString("WTR CLRS %1").arg(m_waterfallColorRange));
+}
+
 // ============================================================================
 // Button Label Updates
 // ============================================================================

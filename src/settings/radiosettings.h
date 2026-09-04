@@ -20,6 +20,9 @@ struct MacroEntry {
             return "Unused";
         return label.isEmpty() ? "Mapped" : label;
     }
+    bool operator==(const MacroEntry &other) const {
+        return functionId == other.functionId && label == other.label && command == other.command;
+    }
 };
 
 // RX EQ preset entry (8-band graphic equalizer)
@@ -108,6 +111,7 @@ public:
     MacroEntry macro(const QString &functionId) const;
     void setMacro(const QString &functionId, const QString &label, const QString &command);
     void clearMacro(const QString &functionId);
+    void replaceMacros(const QMap<QString, MacroEntry> &macros);
 
     // HaliKey CW Keyer settings
     QString halikeyPortName() const;
@@ -129,6 +133,17 @@ public:
     int midiDahStatus() const;
     int midiDahData1() const;
     void setMidiCustomMapping(int ditStatus, int ditData1, int dahStatus, int dahData1);
+    int cwMidiKeyingMode() const; // 0=paddles, 1=straight key/external keyer
+    void setCwMidiKeyingMode(int mode);
+    int cwMidiStraightKeyInput() const; // 0=left/tip, 1=right/ring
+    void setCwMidiStraightKeyInput(int input);
+
+    // Dedicated CTR2-MIDI role. These settings are intentionally separate
+    // from the established CW Keyer connection and profile settings.
+    QString ctr2MidiPortName() const;
+    void setCtr2MidiPortName(const QString &portName);
+    QByteArray ctr2MidiMappingJson() const;
+    void setCtr2MidiMappingJson(const QByteArray &json);
 
     // RX EQ Presets (4 slots)
     EqPreset rxEqPreset(int index) const;                  // Get preset 0-3
@@ -162,6 +177,10 @@ signals:
     void halikeyDeviceTypeChanged(int type);
     void sidetoneVolumeChanged(int value);
     void cwPaddlesReversedChanged(bool reversed);
+    void cwMidiKeyingModeChanged(int mode);
+    void cwMidiStraightKeyInputChanged(int input);
+    void ctr2MidiPortNameChanged(const QString &portName);
+    void ctr2MidiMappingChanged();
     void rxEqPresetsChanged();
     void txEqPresetsChanged();
 
@@ -196,6 +215,11 @@ private:
     int m_midiDitData1 = 20;
     int m_midiDahStatus = 0x90;
     int m_midiDahData1 = 21;
+    int m_cwMidiKeyingMode = 0;
+    int m_cwMidiStraightKeyInput = 0;
+
+    QString m_ctr2MidiPortName;
+    QByteArray m_ctr2MidiMappingJson;
 
     // Macro settings
     QMap<QString, MacroEntry> m_macros;

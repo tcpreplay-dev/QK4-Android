@@ -80,6 +80,12 @@ SidetoneGenerator::SidetoneGenerator(QObject *parent) : QObject(parent) {
     m_repeatTimer->setTimerType(Qt::PreciseTimer);
     connect(m_repeatTimer, &QTimer::timeout, this, &SidetoneGenerator::onRepeatTimer);
 
+    m_straightKeyTimer = new QTimer(this);
+    m_straightKeyTimer->setTimerType(Qt::PreciseTimer);
+    m_straightKeyTimer->setInterval(10);
+    connect(m_straightKeyTimer, &QTimer::timeout,
+            this, &SidetoneGenerator::onStraightKeyTimer);
+
     // Recreate the same low-latency sink after Android's media route settles.
     // This changes route lifecycle only; sidetone samples never enter the
     // buffered Android RX AudioTrack that caused the v1.0.4 delay.
@@ -216,6 +222,8 @@ void SidetoneGenerator::start() {
 void SidetoneGenerator::stop() {
     m_running = false;
     m_repeatTimer->stop();
+    m_straightKeyTimer->stop();
+    m_straightKeyDown = false;
     m_routeRefreshTimer->stop();
 #ifdef Q_OS_ANDROID
     m_androidRoutePollTimer->stop();
@@ -310,6 +318,31 @@ void SidetoneGenerator::playSingleDah() {
     playElement(dahDurationMs());
 }
 
+void SidetoneGenerator::startStraightKey() {
+    if (m_straightKeyDown)
+        return;
+    m_currentElement = ElementNone;
+    m_repeatTimer->stop();
+    m_straightKeyDown = true;
+    playStraightKeyChunk(10, true, false);
+    m_straightKeyTimer->start();
+}
+
+void SidetoneGenerator::stopStraightKey() {
+    if (!m_straightKeyDown)
+        return;
+    m_straightKeyDown = false;
+    m_straightKeyTimer->stop();
+    // Queue only a very short fall behind the last 10 ms chunk. This keeps
+    // release latency bounded while avoiding an abrupt waveform click.
+    playStraightKeyChunk(3, false, true);
+}
+
+void SidetoneGenerator::onStraightKeyTimer() {
+    if (m_straightKeyDown)
+        playStraightKeyChunk(10, false, false);
+}
+
 void SidetoneGenerator::onRepeatTimer() {
     if (m_currentElement == ElementDit) {
         playElement(ditDurationMs());
@@ -385,5 +418,39 @@ void SidetoneGenerator::playElement(int durationMs) {
     } else if (written < buffer.size()) {
         qWarning() << "SidetoneGenerator: partial sidetone write" << written
                    << "of" << buffer.size() << "bytes";
+    }
+}
+
+void SidetoneGenerator::playStraightKeyChunk(int durationMs, bool fadeIn, bool fadeOut) {
+    if (!ensureAudioReady())
+        return;
+
+    constexpr int sampleRate = 48000;
+    const int sampleCount = qMax(1, (sampleRate * durationMs) / 1000);
+    const int edgeSamples = qMin(sampleCount, (sampleRate * 3) / 1000);
+    QByteArray buffer(sampleCount * static_cast<int>(sizeof(qint16)), 0);
+    auto *samples = reinterpret_cast<qint16 *>(buffer.data());
+    const int frequency = m_frequency.load(std::memory_order_relaxed);
+    const float volume = m_volume.load(std::memory_order_relaxed);
+    const double phaseIncrement = 2.0 * M_PI * frequency / sampleRate;
+
+    for (int index = 0; index < sampleCount; ++index) {
+        float envelope = 1.0f;
+        if (fadeIn && index < edgeSamples)
+            envelope *= static_cast<float>(index) / qMax(1, edgeSamples - 1);
+        if (fadeOut && index >= sampleCount - edgeSamples)
+            envelope *= static_cast<float>(sampleCount - 1 - index) / qMax(1, edgeSamples - 1);
+        samples[index] = static_cast<qint16>(qSin(m_phase) * volume * envelope * 32767.0);
+        m_phase += phaseIncrement;
+        if (m_phase >= 2.0 * M_PI)
+            m_phase -= 2.0 * M_PI;
+    }
+
+    const QPointer<QIODevice> pushDevice = m_pushDevice;
+    if (!pushDevice)
+        return;
+    if (pushDevice->write(buffer) < 0) {
+        qWarning() << "SidetoneGenerator: straight-key write failed; rebuilding audio sink";
+        destroyAudio();
     }
 }

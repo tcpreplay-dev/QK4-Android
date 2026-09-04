@@ -13,6 +13,7 @@
 #include <QPushButton>
 #include <QShowEvent>
 #include <QHideEvent>
+#include <QMap>
 #include <QPoint>
 
 class RadioState;
@@ -21,6 +22,8 @@ class MicMeterWidget;
 class KpodDevice;
 class CatServer;
 class HalikeyDevice;
+class Ctr2MidiDevice;
+class Ctr2MappingEditor;
 class QScrollArea;
 
 #ifdef Q_OS_ANDROID
@@ -39,13 +42,15 @@ public:
         PageAudioOutput,
         PageRigControl,
         PageCwKeyer,
+        PageCtr2Midi,
         PageKpod,
         PageFnKeySetup,
         PageCount
     };
 
     explicit OptionsDialog(RadioState *radioState, AudioEngine *audioEngine, KpodDevice *kpodDevice,
-                           CatServer *catServer, HalikeyDevice *halikeyDevice, QWidget *parent = nullptr);
+                           CatServer *catServer, HalikeyDevice *halikeyDevice,
+                           Ctr2MidiDevice *ctr2MidiDevice, QWidget *parent = nullptr);
     ~OptionsDialog();
 
 signals:
@@ -77,18 +82,27 @@ private:
     QWidget *createAudioOutputPage();
     QWidget *createRigControlPage();
     QWidget *createCwKeyerPage();
+    QWidget *createCtr2MidiPage();
     QWidget *createFnKeySetupPage();
+    void requestReturnToOperate();
     void updateCatServerStatus();
     void populateMicDevices();
     void populateSpeakerDevices();
     void populateCwKeyerPorts();
     void setTouchSliderValue(QSlider *slider, int xPosition);
+    void saveFnKeyEditor(const QString &functionId);
+    void persistFnKeyEditors();
+    void refreshFnKeyEditors();
+    void loadFnKeyFile();
+    bool saveFnKeyFile();
 
     RadioState *m_radioState;
     AudioEngine *m_audioEngine;
     KpodDevice *m_kpodDevice;
     CatServer *m_catServer;
     HalikeyDevice *m_halikeyDevice;
+    Ctr2MidiDevice *m_ctr2MidiDevice;
+    Ctr2MappingEditor *m_ctr2MappingEditor = nullptr;
     QListWidget *m_tabList;
     QStackedWidget *m_pageStack;
     bool m_pageCreated[PageCount] = {};
@@ -147,6 +161,15 @@ private:
     int m_cwScrollPressY = 0;
     int m_cwScrollStartValue = 0;
     void updateCwKeyerDescription();
+
+    struct FnKeyEditors {
+        QLineEdit *label = nullptr;
+        QLineEdit *command = nullptr;
+    };
+    QMap<QString, FnKeyEditors> m_fnKeyEditors;
+    QLabel *m_fnKeySaveStatus = nullptr;
+    QString m_fnKeyMemoryName = QStringLiteral("QK4 FN Key Setup");
+    bool m_loadingFnKeyFile = false;
 };
 
 #endif // OPTIONSDIALOG_H

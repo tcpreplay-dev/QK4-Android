@@ -35,6 +35,11 @@ public:
     Q_INVOKABLE void playSingleDit();
     Q_INVOKABLE void playSingleDah();
 
+    // Continuous local tone for a straight key or external keyer. The K4
+    // command path preserves the same key-down/key-up edge timing.
+    Q_INVOKABLE void startStraightKey();
+    Q_INVOKABLE void stopStraightKey();
+
 signals:
     // Emitted when repeat timer fires (for sending KZ commands)
     void ditRepeated();
@@ -42,6 +47,7 @@ signals:
 
 private slots:
     void onRepeatTimer();
+    void onStraightKeyTimer();
     void scheduleAudioRouteRefresh();
     void refreshAudioRoute();
 #ifdef Q_OS_ANDROID
@@ -53,6 +59,7 @@ private:
     void destroyAudio();
     bool ensureAudioReady();
     void playElement(int durationMs);
+    void playStraightKeyChunk(int durationMs, bool fadeIn, bool fadeOut);
     int ditDurationMs() const;
     int dahDurationMs() const;
 
@@ -64,6 +71,7 @@ private:
     // generator, so a guarded pointer is required here.
     QPointer<QIODevice> m_pushDevice;
     QTimer *m_repeatTimer = nullptr;
+    QTimer *m_straightKeyTimer = nullptr;
     QMediaDevices *m_mediaDevices = nullptr;
     QTimer *m_routeRefreshTimer = nullptr;
 #ifdef Q_OS_ANDROID
@@ -77,6 +85,7 @@ private:
     std::atomic<int> m_keyerWpm{20};
     double m_phase = 0.0;
     Element m_currentElement = ElementNone;
+    bool m_straightKeyDown = false;
 };
 
 #endif // SIDETONEGENERATOR_H

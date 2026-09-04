@@ -2,9 +2,11 @@
 
 QK4 Android is a phone-focused Android client for Elecraft K4 transceivers. It preserves the proven radio-control, TCP/TLS, panadapter-stream, and TX/RX audio architecture of QK4 while replacing its desktop-oriented interaction model with a landscape touch interface.
 
-The application is under active development and is intended for testing with an Elecraft K4/K4D on the same network. Version 1.0.3 is the current ARM64 release.
+The application is under active development and is intended for use with an
+Elecraft K4/K4D on the same network. Version 1.0.4 is the current ARM64
+release.
 
-![QK4 Mobile v0.8.0 console](https://github.com/worldwidedx/QK4-Android/releases/download/v0.8.0/QK4-Mobile-v0.8.0-Screenshot.png)
+![QK4 Mobile v0.8.0 console](./docs/images/QK4-Mobile-v0.8.0-Console.png)
 
 ## Project lineage
 
@@ -22,10 +24,17 @@ to remote clients, such as BAND/MEM, remain outside the application's control.
 - K4 profile management and TCP/TLS connection
 - RX audio streaming for the main and sub receivers
 - Microphone audio and PTT transmission
-- Remote CW keying from Bluetooth LE and USB MIDI paddle interfaces, including
-  TinyMIDI and HaliKey MIDI presets plus learnable custom MIDI mappings
+- Remote CW keying from Bluetooth LE and USB MIDI interfaces, including
+  paddles, straight keys, and external keyers with TinyMIDI, HaliKey MIDI,
+  CTR2-MIDI, and learnable custom MIDI mappings
 - K4-synchronized paddle orientation, Iambic mode, keying weight, CW speed,
-  local sidetone, and paddle testing
+  local sidetone, and key testing
+- Independent CW Keyer and CTR2-MIDI connections, allowing two USB/BLE MIDI
+  devices to remain available at the same time
+- User-configurable CTR2 knob modes and independent short/long button actions,
+  including predefined radio controls and exact K4 programmer commands
+- User-accessible save/load files for complete CTR2 mappings and F1-F8 FN-key
+  configurations
 - USB-C headset RX/TX hot-swap, plus Bluetooth/USB mixed-route support where Android provides it
 - Android hearing-aid RX routing when the operating system exposes a dedicated hearing-aid output
 - VFO A/B display, tuning, direct frequency entry, and selectable tuning steps
@@ -46,6 +55,82 @@ to remote clients, such as BAND/MEM, remain outside the application's control.
 
 See [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for the verified state and next work.
 
+## MIDI hardware, straight keys, and CTR2-MIDI
+
+QK4 Mobile provides two independent MIDI device roles. The **CW Keyer** role
+supports TinyMIDI, HaliKey MIDI, and learnable custom devices. The dedicated
+**CTR2** role connects separately, so an operator can, for example, use a
+TinyMIDI for paddles or a straight key while using CTR2-MIDI for its knob and
+buttons. Both roles discover USB MIDI and Bluetooth LE MIDI devices, remember
+their own selected endpoint, and can contribute CW input without one device
+disabling the other.
+
+### CTR2 connection and key input
+
+The CTR2 page contains its own connection controls and starts with the
+K4-Control-compatible default mapping. CTR2 key input can be disabled or set
+for paddles, or for a straight key/external keyer plus PTT. Normal and extended
+CTR2 button layouts are supported; the QK4 selection must match the Extended
+BTN setting on the CTR2 itself.
+
+![QK4 Mobile CTR2 connection and mapping setup](./docs/images/QK4-Mobile-v1.0.4-CTR2-Setup-Connection.png)
+
+### CTR2 knob modes
+
+Each of the eight CTR2 knob messages, CC100 through CC107, can be assigned to a
+predefined QK4 radio control. The supplied Map 1 defaults retain CTR2's native
+MIDI formats: CC100 uses speed-sensitive **Wheel A**, while CC101 through CC107
+use **Slider A** output. The output selection describes the MIDI format emitted
+by CTR2; it is not chosen according to whether the QK4 control is drawn as a
+knob or slider.
+
+Available actions include active and other VFO tuning, main/sub volume and RF
+gain, filter bandwidth and shift, RIT/XIT, NR and NB level, squelch, RF power,
+CW speed, panadapter zoom and reference level, and local waterfall brightness.
+A knob assigned to **Selected adjustment (button)** behaves like a radio
+multi-function control: a button assigned to an **Adjust:** action selects the
+function, opens the corresponding QK4 adjustment control when one exists, and
+the knob then changes that setting.
+
+![QK4 Mobile CTR2 knob-mode mappings](./docs/images/QK4-Mobile-v1.0.4-CTR2-Knob-Mapping.png)
+
+### CTR2 buttons and mapping files
+
+Short and long presses are separate assignments. A button can invoke a
+predefined function such as Band up/down, Rate, KHZ, TX/RX toggle, or an
+**Adjust:** action. It can instead send a supported K4 Programmer's Reference
+command or command sequence exactly as entered; QK4 does not invent or merge a
+separate macro language.
+
+![QK4 Mobile CTR2 short/long button mappings](./docs/images/QK4-Mobile-v1.0.4-CTR2-Button-Mapping.png)
+
+Complete CTR2 configurations can be saved to and loaded from user-accessible
+`.qk4ctr2map` files. Loading replaces the complete mapping rather than merging
+it. QK4 prompts to apply or abandon pending edits before leaving the setup
+screen, and prompts about saving only when a load would replace unsaved
+changes. Exported files document the accepted action and output keywords,
+including when to use Wheel or Slider formats. See the
+[sample CTR2 mapping](docs/QK4-CTR2-Rate-KHZ-Sample.qk4ctr2map).
+
+The separate **Fn Key Setup** page can likewise save or load all F1-F8 labels
+and K4 command strings in a user-editable `.qk4fnmap` file.
+
+### Iambic paddle, straight-key, and external-keyer support
+
+The CW Keyer role supports Iambic paddles with the established orientation,
+Iambic mode, weight, speed, local sidetone, and test controls. TinyMIDI,
+HaliKey MIDI, and learnable custom devices can connect over USB MIDI or
+Bluetooth LE MIDI.
+
+![QK4 Mobile CW Iambic paddle and speed setup](./docs/images/QK4-Mobile-v1.0.4-CW-Iambic-Paddle-Setup.png)
+
+TinyMIDI, HaliKey MIDI, custom MIDI devices, and CTR2-MIDI can also be
+configured for straight-key or external-keyer input. QK4 preserves each
+key-down and key-up transition and generates the local sidetone; the K4's
+delayed monitor audio is not required.
+
+![QK4 Mobile CW straight-key setup](./docs/images/QK4-Mobile-v1.0.4-CW-Straight-Key-Setup.png)
+
 ## Supported target
 
 | Item | Current development target |
@@ -59,6 +144,18 @@ See [docs/PROJECT_STATUS.md](docs/PROJECT_STATUS.md) for the verified state and 
 | Radio | Elecraft K4/K4D |
 
 Other platforms remain present in the inherited QK4 source, but this repository's supported product target is Android. Physical acceptance testing has been performed on a Samsung Galaxy S26 Ultra; test other phone families before treating them as validated.
+
+## Integrated SSTV
+
+QK4 Mobile receives and transmits all 22 supported SSTV modes directly through
+the K4 network-audio path. Automatic receive includes progressive decoding,
+mode detection, slant correction, callsign identification, and retained image
+history. The transmit workspace provides exact mode-sized composition,
+gallery/camera sources, crop and positioning, reusable templates, text and
+markup, preview, and optional post-image FSK and CW identification. Transmit
+uses deliberate phone PTT, program audio, and automatic return to receive.
+
+![QK4 Mobile SSTV transmit editor](./docs/images/QK4-Mobile-v1.0.4-SSTV-Transmit.png)
 
 ## Recommended K4 operating settings
 

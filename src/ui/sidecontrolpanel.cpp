@@ -12,6 +12,7 @@
 #include <QMouseEvent>
 #include <QScrollArea>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QStyle>
 
 SideControlPanel::SideControlPanel(QWidget *parent) : QWidget(parent) {
@@ -25,6 +26,77 @@ SideControlPanel::SideControlPanel(QWidget *parent) : QWidget(parent) {
         triggerSecondary(m_longPressTarget);
     });
     setupUi();
+}
+
+void SideControlPanel::selectAdjustment(Adjustment adjustment) {
+    const auto setPrimary = [this](DualControlButton *button, QSlider *slider,
+                                   bool &isPrimary, bool wantPrimary) {
+        if (isPrimary != wantPrimary) {
+            button->swapFunctions();
+            isPrimary = wantPrimary;
+        }
+        configureAdjustmentSlider(button, slider);
+    };
+
+    switch (adjustment) {
+    case Adjustment::MainVolume:
+    case Adjustment::SubVolume:
+        break;
+    case Adjustment::CwSpeed:
+        if (m_isCWMode) {
+            setPrimary(m_wpmBtn, m_wpmSlider, m_wpmIsPrimary, true);
+            setGroup1Active(m_wpmBtn);
+        }
+        break;
+    case Adjustment::RfPower:
+        setPrimary(m_pwrBtn, m_pwrSlider, m_pwrIsPrimary, true);
+        setGroup1Active(m_pwrBtn);
+        break;
+    case Adjustment::FilterBandwidth:
+    case Adjustment::FilterShift:
+        if (!m_bwIsPrimary) {
+            m_bwBtn->swapFunctions();
+            m_shiftBtn->swapFunctions();
+            m_bwIsPrimary = true;
+            m_shiftIsPrimary = true;
+        }
+        configureAdjustmentSlider(m_bwBtn, m_bwSlider);
+        configureAdjustmentSlider(m_shiftBtn, m_shiftSlider);
+        setGroup2Active(adjustment == Adjustment::FilterBandwidth ? m_bwBtn : m_shiftBtn);
+        break;
+    case Adjustment::MainRfGain:
+        setPrimary(m_mainRfBtn, m_mainRfSlider, m_mainRfIsPrimary, true);
+        setGroup3Active(m_mainRfBtn);
+        break;
+    case Adjustment::MainSquelch:
+        setPrimary(m_mainRfBtn, m_mainRfSlider, m_mainRfIsPrimary, false);
+        setGroup3Active(m_mainRfBtn);
+        break;
+    case Adjustment::SubSquelch:
+        setPrimary(m_subSqlBtn, m_subSqlSlider, m_subSqlIsPrimary, true);
+        setGroup3Active(m_subSqlBtn);
+        break;
+    case Adjustment::SubRfGain:
+        setPrimary(m_subSqlBtn, m_subSqlSlider, m_subSqlIsPrimary, false);
+        setGroup3Active(m_subSqlBtn);
+        break;
+    }
+}
+
+QWidget *SideControlPanel::adjustmentWidget(Adjustment adjustment) const {
+    switch (adjustment) {
+    case Adjustment::MainVolume: return m_volumeSlider;
+    case Adjustment::SubVolume: return m_subVolumeSlider;
+    case Adjustment::CwSpeed: return m_isCWMode ? m_wpmBtn : nullptr;
+    case Adjustment::RfPower: return m_pwrBtn;
+    case Adjustment::FilterBandwidth: return m_bwBtn;
+    case Adjustment::FilterShift: return m_shiftBtn;
+    case Adjustment::MainRfGain:
+    case Adjustment::MainSquelch: return m_mainRfBtn;
+    case Adjustment::SubSquelch:
+    case Adjustment::SubRfGain: return m_subSqlBtn;
+    }
+    return nullptr;
 }
 
 void SideControlPanel::setupUi() {
@@ -832,6 +904,20 @@ int SideControlPanel::volume() const {
 
 int SideControlPanel::subVolume() const {
     return m_subVolumeSlider ? m_subVolumeSlider->value() : 100;
+}
+
+void SideControlPanel::setVolume(int value) {
+    if (!m_volumeSlider)
+        return;
+    const QSignalBlocker blocker(m_volumeSlider);
+    m_volumeSlider->setValue(qBound(0, value, 100));
+}
+
+void SideControlPanel::setSubVolume(int value) {
+    if (!m_subVolumeSlider)
+        return;
+    const QSignalBlocker blocker(m_subVolumeSlider);
+    m_subVolumeSlider->setValue(qBound(0, value, 100));
 }
 
 void SideControlPanel::setPhoneMicGain(int value) {

@@ -76,7 +76,9 @@ public:
     void setMicGain(int gain);
     void setCompression(int level);
 
-    // Optimistic setters for NB/NR (radio doesn't echo these commands)
+    // Optimistic setters for receiver processing adjustments.
+    void setAttenuatorLevel(int level);
+    void setAttenuatorLevelB(int level);
     void setNoiseBlankerLevel(int level);
     void setNoiseBlankerLevelB(int level);
     void setNoiseBlankerFilter(int filter);

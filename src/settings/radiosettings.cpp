@@ -288,6 +288,22 @@ void RadioSettings::clearMacro(const QString &functionId) {
     }
 }
 
+void RadioSettings::replaceMacros(const QMap<QString, MacroEntry> &macros) {
+    QMap<QString, MacroEntry> normalized;
+    for (auto it = macros.cbegin(); it != macros.cend(); ++it) {
+        if (it->command.isEmpty())
+            continue;
+        MacroEntry entry = it.value();
+        entry.functionId = it.key();
+        normalized.insert(it.key(), entry);
+    }
+    if (normalized == m_macros)
+        return;
+    m_macros = normalized;
+    save();
+    emit macrosChanged();
+}
+
 QString RadioSettings::halikeyPortName() const {
     return m_halikeyPortName;
 }
@@ -370,6 +386,40 @@ void RadioSettings::setMidiCustomMapping(int ditStatus, int ditData1, int dahSta
     m_midiDahData1 = qBound(0, dahData1, 127);
     m_midiMappingProfile = 2;
     save();
+}
+
+int RadioSettings::cwMidiKeyingMode() const { return m_cwMidiKeyingMode; }
+void RadioSettings::setCwMidiKeyingMode(int mode) {
+    mode = qBound(0, mode, 1);
+    if (m_cwMidiKeyingMode == mode) return;
+    m_cwMidiKeyingMode = mode;
+    save();
+    emit cwMidiKeyingModeChanged(mode);
+}
+
+int RadioSettings::cwMidiStraightKeyInput() const { return m_cwMidiStraightKeyInput; }
+void RadioSettings::setCwMidiStraightKeyInput(int input) {
+    input = qBound(0, input, 1);
+    if (m_cwMidiStraightKeyInput == input) return;
+    m_cwMidiStraightKeyInput = input;
+    save();
+    emit cwMidiStraightKeyInputChanged(input);
+}
+
+QString RadioSettings::ctr2MidiPortName() const { return m_ctr2MidiPortName; }
+void RadioSettings::setCtr2MidiPortName(const QString &portName) {
+    if (m_ctr2MidiPortName == portName) return;
+    m_ctr2MidiPortName = portName;
+    save();
+    emit ctr2MidiPortNameChanged(portName);
+}
+
+QByteArray RadioSettings::ctr2MidiMappingJson() const { return m_ctr2MidiMappingJson; }
+void RadioSettings::setCtr2MidiMappingJson(const QByteArray &json) {
+    if (m_ctr2MidiMappingJson == json) return;
+    m_ctr2MidiMappingJson = json;
+    save();
+    emit ctr2MidiMappingChanged();
 }
 
 void RadioSettings::setSidetoneVolume(int value) {
@@ -471,6 +521,10 @@ void RadioSettings::load() {
     m_midiDitData1 = m_settings.value("halikey/midiDitData1", 20).toInt();
     m_midiDahStatus = m_settings.value("halikey/midiDahStatus", 0x90).toInt();
     m_midiDahData1 = m_settings.value("halikey/midiDahData1", 21).toInt();
+    m_cwMidiKeyingMode = qBound(0, m_settings.value("halikey/keyingMode", 0).toInt(), 1);
+    m_cwMidiStraightKeyInput = qBound(0, m_settings.value("halikey/straightKeyInput", 0).toInt(), 1);
+    m_ctr2MidiPortName = m_settings.value("ctr2Midi/portName", "").toString();
+    m_ctr2MidiMappingJson = m_settings.value("ctr2Midi/mappingJson").toByteArray();
 
     // Macro settings
     int macroCount = m_settings.beginReadArray("macros");
@@ -568,6 +622,10 @@ void RadioSettings::save() {
     m_settings.setValue("halikey/midiDitData1", m_midiDitData1);
     m_settings.setValue("halikey/midiDahStatus", m_midiDahStatus);
     m_settings.setValue("halikey/midiDahData1", m_midiDahData1);
+    m_settings.setValue("halikey/keyingMode", m_cwMidiKeyingMode);
+    m_settings.setValue("halikey/straightKeyInput", m_cwMidiStraightKeyInput);
+    m_settings.setValue("ctr2Midi/portName", m_ctr2MidiPortName);
+    m_settings.setValue("ctr2Midi/mappingJson", m_ctr2MidiMappingJson);
 
     // Macro settings
     m_settings.beginWriteArray("macros");

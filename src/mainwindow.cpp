@@ -47,6 +47,9 @@
 #include "sstv/sstvdecoder.h"
 #include "hardware/kpoddevice.h"
 #include "hardware/halikeydevice.h"
+#include "hardware/ctr2mididevice.h"
+#include "hardware/midiinputrouter.h"
+#include "hardware/midimapping.h"
 #include "hardware/iambickeyer.h"
 #include "network/kpa1500client.h"
 #include "ui/kpa1500window.h"
@@ -74,6 +77,8 @@
 #include <QEvent>
 #include <QResizeEvent>
 #include <QRegularExpression>
+#include <QJsonDocument>
+#include <QJsonParseError>
 #include <QMouseEvent>
 #include <algorithm>
 #include <QShowEvent>
@@ -482,6 +487,7 @@ MainWindow::MainWindow(QWidget *parent)
         showControlFeedback(QString("WATERFALL: %1").arg((color >= 0 && color <= 4) ? names[color] : "COLOR"));
     });
     connect(m_displayPopup, &DisplayPopupWidget::waterfallColorRangeLocallyChanged, this, [this](int range) {
+        m_midiWaterfallColorRange = range;
         m_panadapterA->setWaterfallColorRange(range);
         m_panadapterB->setWaterfallColorRange(range);
     });
@@ -2267,8 +2273,74 @@ MainWindow::MainWindow(QWidget *parent)
         m_kpodDevice->startPolling();
     }
 
-    // HaliKey CW paddle device
+    // Keep the v1.0.3 CW connection as Android MIDI session 0. CTR2-MIDI has
+    // a separate connection object backed by session 1; neither setup can
+    // overwrite the other device selection or mapping.
     m_halikeyDevice = new HalikeyDevice(this);
+    m_ctr2MidiDevice = new Ctr2MidiDevice(this);
+    m_midiInputRouter = new MidiInputRouter(this);
+
+    const auto loadCtr2Mapping = [this]() {
+        MidiMapping::DeviceMapping mapping = MidiMapping::ctr2Default();
+        const QByteArray json = RadioSettings::instance()->ctr2MidiMappingJson();
+        if (!json.isEmpty()) {
+            QJsonParseError parseError;
+            const QJsonDocument document = QJsonDocument::fromJson(json, &parseError);
+            MidiMapping::DeviceMapping stored;
+            QString mappingError;
+            if (parseError.error == QJsonParseError::NoError && document.isObject()
+                && MidiMapping::fromJson(document.object(), &stored, &mappingError)
+                && stored.profile == MidiMapping::Profile::Ctr2) {
+                mapping = stored;
+            } else {
+                qWarning() << "Ignoring invalid saved CTR2-MIDI mapping:" << mappingError;
+            }
+        }
+        m_midiInputRouter->setMapping(QStringLiteral("ctr2-midi"), mapping);
+    };
+    loadCtr2Mapping();
+    connect(RadioSettings::instance(), &RadioSettings::ctr2MidiMappingChanged,
+            this, loadCtr2Mapping);
+
+    // Feed the logical CW edges from the unchanged CW device path and raw
+    // CTR2 events into one source-aware aggregator. Releasing/disconnecting
+    // either device cannot release an input that the other device still holds.
+    connect(m_halikeyDevice, &HalikeyDevice::ditStateChanged, this, [this](bool pressed) {
+        m_midiInputRouter->setLogicalInput(QStringLiteral("cw-midi"),
+                                           MidiMapping::LogicalInput::Dit, pressed);
+    });
+    connect(m_halikeyDevice, &HalikeyDevice::dahStateChanged, this, [this](bool pressed) {
+        m_midiInputRouter->setLogicalInput(QStringLiteral("cw-midi"),
+                                           MidiMapping::LogicalInput::Dah, pressed);
+    });
+    connect(m_halikeyDevice, &HalikeyDevice::straightKeyStateChanged, this, [this](bool pressed) {
+        m_midiInputRouter->setLogicalInput(QStringLiteral("cw-midi"),
+                                           MidiMapping::LogicalInput::StraightKey, pressed);
+    });
+    connect(m_halikeyDevice, &HalikeyDevice::pttStateChanged, this, [this](bool pressed) {
+        m_midiInputRouter->setLogicalInput(QStringLiteral("cw-midi"),
+                                           MidiMapping::LogicalInput::Ptt, pressed);
+    });
+    connect(m_halikeyDevice, &HalikeyDevice::disconnected, this, [this]() {
+        m_midiInputRouter->clearSourceState(QStringLiteral("cw-midi"));
+        if (!m_midiInputRouter->logicalInputActive(MidiMapping::LogicalInput::Dit)
+            && !m_midiInputRouter->logicalInputActive(MidiMapping::LogicalInput::Dah)
+            && m_iambicKeyer) {
+            QMetaObject::invokeMethod(m_iambicKeyer, "stop", Qt::QueuedConnection);
+        }
+    });
+    connect(m_ctr2MidiDevice, &Ctr2MidiDevice::rawMidiEvent, this,
+            [this](int status, int data1, int data2) {
+                m_midiInputRouter->processEvent(QStringLiteral("ctr2-midi"), status, data1, data2);
+            });
+    connect(m_ctr2MidiDevice, &Ctr2MidiDevice::disconnected, this, [this]() {
+        m_midiInputRouter->clearSourceState(QStringLiteral("ctr2-midi"));
+        if (!m_midiInputRouter->logicalInputActive(MidiMapping::LogicalInput::Dit)
+            && !m_midiInputRouter->logicalInputActive(MidiMapping::LogicalInput::Dah)
+            && m_iambicKeyer) {
+            QMetaObject::invokeMethod(m_iambicKeyer, "stop", Qt::QueuedConnection);
+        }
+    });
 
     // Match current upstream QK4: raw paddle edges feed a high-priority local
     // iambic keyer. It aligns alternating paddles to element boundaries and
@@ -2324,10 +2396,26 @@ MainWindow::MainWindow(QWidget *parent)
             m_tcpClient->sendCAT(QString("KZL%1;").arg(1200 / wpm, 2, 10, QChar('0')));
     });
 
-    connect(m_halikeyDevice, &HalikeyDevice::ditStateChanged, m_iambicKeyer,
+    connect(m_midiInputRouter, &MidiInputRouter::ditStateChanged, m_iambicKeyer,
             [this](bool pressed) { m_iambicKeyer->setDitPaddle(pressed); }, Qt::DirectConnection);
-    connect(m_halikeyDevice, &HalikeyDevice::dahStateChanged, m_iambicKeyer,
+    connect(m_midiInputRouter, &MidiInputRouter::dahStateChanged, m_iambicKeyer,
             [this](bool pressed) { m_iambicKeyer->setDahPaddle(pressed); }, Qt::DirectConnection);
+    connect(m_midiInputRouter, &MidiInputRouter::straightKeyStateChanged, this, [this](bool pressed) {
+        if (m_tcpClient->isConnected())
+            m_tcpClient->sendCAT(pressed ? QStringLiteral("KZD0000;")
+                                         : QStringLiteral("KZU0000;"));
+        QMetaObject::invokeMethod(m_sidetoneGenerator,
+                                  pressed ? "startStraightKey" : "stopStraightKey",
+                                  Qt::QueuedConnection);
+    });
+    connect(m_midiInputRouter, &MidiInputRouter::pttStateChanged, this,
+            [this](bool pressed) { pressed ? onPttPressed() : onPttReleased(); });
+    connect(m_midiInputRouter, &MidiInputRouter::knobActionRequested,
+            this, &MainWindow::handleMidiKnobAction);
+    connect(m_midiInputRouter, &MidiInputRouter::buttonActionRequested,
+            this, &MainWindow::handleMidiButtonAction);
+    connect(m_midiInputRouter, &MidiInputRouter::macroRequested, this,
+            [this](const QString &, const QString &command) { executeMidiMacro(command); });
     connect(m_iambicKeyer, &IambicKeyer::elementStarted, m_tcpClient, [this](bool isDit) {
         if (m_tcpClient->isConnected())
             m_tcpClient->sendCAT(isDit ? "KZ.;" : "KZ-;");
@@ -2344,9 +2432,6 @@ MainWindow::MainWindow(QWidget *parent)
             m_tcpClient->sendCAT(QString("KZP%1;").arg(ms, 4, 10, QChar('0')));
     }, Qt::QueuedConnection);
 
-    connect(m_halikeyDevice, &HalikeyDevice::disconnected, this, [this]() {
-        QMetaObject::invokeMethod(m_iambicKeyer, "stop", Qt::QueuedConnection);
-    });
     connect(m_radioState, &RadioState::keyerPaddleChanged, this, [this](QChar orientation) {
         const bool reversed = orientation == 'R';
         RadioSettings::instance()->setCwPaddlesReversed(reversed);
@@ -2511,6 +2596,9 @@ MainWindow::~MainWindow() {
     if (m_halikeyDevice) {
         m_halikeyDevice->closePort();
     }
+    if (m_ctr2MidiDevice) {
+        m_ctr2MidiDevice->closePort();
+    }
 
     // Stop the KZ producer before the network thread it targets.
     if (m_keyerThread) {
@@ -2591,7 +2679,7 @@ void MainWindow::setupMenuBar() {
 void MainWindow::showSettings() {
     if (!m_optionsDialog) {
         m_optionsDialog = new OptionsDialog(m_radioState, m_audioEngine, m_kpodDevice, m_catServer,
-                                            m_halikeyDevice, centralWidget());
+                                            m_halikeyDevice, m_ctr2MidiDevice, centralWidget());
         connect(m_optionsDialog, &OptionsDialog::keyerSpeedRequested, this, [this](int wpm) {
             const int boundedWpm = qBound(8, wpm, 40);
             m_tcpClient->sendCAT(QString("KS%1;").arg(boundedWpm, 3, 10, QChar('0')));
@@ -2608,6 +2696,68 @@ void MainWindow::showSettings() {
 #else
     m_optionsDialog->setFocus(Qt::OtherFocusReason);
 #endif
+}
+
+void MainWindow::showFeatureAdjustment(int featureValue) {
+    if (!m_featureMenuBar || !m_bottomMenuBar)
+        return;
+    const auto feature = static_cast<FeatureMenuBar::Feature>(featureValue);
+    if (m_phoneControlsDialog)
+        m_phoneControlsDialog->hide();
+    const bool alreadyVisible = m_featureMenuBar->isMenuVisible()
+                                && m_featureMenuBar->currentFeature() == feature;
+    if (m_featureMenuBar->isMenuVisible() && !alreadyVisible)
+        m_featureMenuBar->hideMenu();
+
+    const bool bSet = m_radioState->bSetEnabled();
+    switch (feature) {
+    case FeatureMenuBar::Attenuator:
+        m_featureMenuBar->setFeatureEnabled(bSet ? m_radioState->attenuatorEnabledB()
+                                                 : m_radioState->attenuatorEnabled());
+        m_featureMenuBar->setValue(bSet ? m_radioState->attenuatorLevelB()
+                                        : m_radioState->attenuatorLevel());
+        break;
+    case FeatureMenuBar::NbLevel:
+        m_featureMenuBar->setFeatureEnabled(bSet ? m_radioState->noiseBlankerEnabledB()
+                                                 : m_radioState->noiseBlankerEnabled());
+        m_featureMenuBar->setValue(bSet ? m_radioState->noiseBlankerLevelB()
+                                        : m_radioState->noiseBlankerLevel());
+        m_featureMenuBar->setNbFilter(bSet ? m_radioState->noiseBlankerFilterWidthB()
+                                           : m_radioState->noiseBlankerFilterWidth());
+        break;
+    case FeatureMenuBar::NrAdjust: {
+        const bool lmsOn = bSet ? m_radioState->noiseReductionEnabledB()
+                                : m_radioState->noiseReductionEnabled();
+        const bool ssnrOn = bSet ? m_radioState->ssnrEnabledB()
+                                 : m_radioState->ssnrEnabled();
+        if (ssnrOn && !lmsOn)
+            m_featureMenuBar->setNrEngine(FeatureMenuBar::Ssnr);
+        else if (lmsOn && !ssnrOn)
+            m_featureMenuBar->setNrEngine(FeatureMenuBar::Lms);
+        if (m_featureMenuBar->currentNrEngine() == FeatureMenuBar::Ssnr) {
+            m_featureMenuBar->setFeatureEnabled(ssnrOn);
+            m_featureMenuBar->setValue(bSet ? m_radioState->ssnrLevelB()
+                                            : m_radioState->ssnrLevel());
+        } else {
+            m_featureMenuBar->setFeatureEnabled(lmsOn);
+            m_featureMenuBar->setValue(bSet ? m_radioState->noiseReductionLevelB()
+                                            : m_radioState->noiseReductionLevel());
+        }
+        break;
+    }
+    case FeatureMenuBar::ManualNotch:
+        m_featureMenuBar->setFeatureEnabled(bSet ? m_radioState->manualNotchEnabledB()
+                                                 : m_radioState->manualNotchEnabled());
+        m_featureMenuBar->setValue(bSet ? m_radioState->manualNotchPitchB()
+                                        : m_radioState->manualNotchPitch());
+        break;
+    }
+    if (!alreadyVisible) {
+        m_featureMenuBar->showForFeature(feature);
+        m_featureMenuBar->showAboveWidget(m_bottomMenuBar);
+    } else {
+        m_featureMenuBar->raise();
+    }
 }
 
 void MainWindow::showAboutDialog() {
@@ -3601,68 +3751,7 @@ void MainWindow::setupUi() {
     // drawer. Hide that top-level drawer first; otherwise it stacks above the
     // main-window FeatureMenuBar and makes its touch controls inaccessible.
     auto showFeatureAdjustment = [this](FeatureMenuBar::Feature feature) {
-        if (m_phoneControlsDialog)
-            m_phoneControlsDialog->hide();
-        if (m_featureMenuBar->isMenuVisible())
-            m_featureMenuBar->hideMenu();
-
-        // Populate initial state from RadioState (use Sub RX state if B SET enabled)
-        bool bSet = m_radioState->bSetEnabled();
-        switch (feature) {
-            case FeatureMenuBar::Attenuator:
-                if (bSet) {
-                    m_featureMenuBar->setFeatureEnabled(m_radioState->attenuatorEnabledB());
-                    m_featureMenuBar->setValue(m_radioState->attenuatorLevelB());
-                } else {
-                    m_featureMenuBar->setFeatureEnabled(m_radioState->attenuatorEnabled());
-                    m_featureMenuBar->setValue(m_radioState->attenuatorLevel());
-                }
-                break;
-            case FeatureMenuBar::NbLevel:
-                if (bSet) {
-                    m_featureMenuBar->setFeatureEnabled(m_radioState->noiseBlankerEnabledB());
-                    m_featureMenuBar->setValue(m_radioState->noiseBlankerLevelB());
-                    m_featureMenuBar->setNbFilter(m_radioState->noiseBlankerFilterWidthB());
-                } else {
-                    m_featureMenuBar->setFeatureEnabled(m_radioState->noiseBlankerEnabled());
-                    m_featureMenuBar->setValue(m_radioState->noiseBlankerLevel());
-                    m_featureMenuBar->setNbFilter(m_radioState->noiseBlankerFilterWidth());
-                }
-                break;
-            case FeatureMenuBar::NrAdjust:
-                {
-                    const bool lmsOn = bSet ? m_radioState->noiseReductionEnabledB()
-                                            : m_radioState->noiseReductionEnabled();
-                    const bool ssnrOn = bSet ? m_radioState->ssnrEnabledB() : m_radioState->ssnrEnabled();
-                    if (ssnrOn && !lmsOn)
-                        m_featureMenuBar->setNrEngine(FeatureMenuBar::Ssnr);
-                    else if (lmsOn && !ssnrOn)
-                        m_featureMenuBar->setNrEngine(FeatureMenuBar::Lms);
-                    if (m_featureMenuBar->currentNrEngine() == FeatureMenuBar::Ssnr) {
-                        m_featureMenuBar->setFeatureEnabled(ssnrOn);
-                        m_featureMenuBar->setValue(bSet ? m_radioState->ssnrLevelB() : m_radioState->ssnrLevel());
-                    } else {
-                        m_featureMenuBar->setFeatureEnabled(lmsOn);
-                        m_featureMenuBar->setValue(
-                            bSet ? m_radioState->noiseReductionLevelB() : m_radioState->noiseReductionLevel());
-                    }
-                }
-                break;
-            case FeatureMenuBar::ManualNotch:
-                // Use correct VFO's notch state
-                if (bSet) {
-                    m_featureMenuBar->setFeatureEnabled(m_radioState->manualNotchEnabledB());
-                    m_featureMenuBar->setValue(m_radioState->manualNotchPitchB());
-                } else {
-                    m_featureMenuBar->setFeatureEnabled(m_radioState->manualNotchEnabled());
-                    m_featureMenuBar->setValue(m_radioState->manualNotchPitch());
-                }
-                break;
-        }
-        // Show the adjustment popup above the bottom menu bar, with no CTRL
-        // drawer remaining above it.
-        m_featureMenuBar->showForFeature(feature);
-        m_featureMenuBar->showAboveWidget(m_bottomMenuBar);
+        this->showFeatureAdjustment(static_cast<int>(feature));
     };
     connect(m_rightSidePanel, &RightSidePanel::attnClicked, this,
             [=]() { showFeatureAdjustment(FeatureMenuBar::Attenuator); });
@@ -5168,6 +5257,7 @@ void MainWindow::onAuthenticated() {
     m_tcpClient->sendCAT("#SCL;");  // Panadapter scale - not in RDY, needed for dB range
     m_tcpClient->sendCAT("RT$;");   // VFO B RIT state - needed for B SET and touch offset control
     m_tcpClient->sendCAT("RO$;");   // VFO B offset - used by split XIT and B SET RIT
+    m_tcpClient->sendCAT("VT;VT$;"); // Both VFO tuning rates - required by external frequency controls
     m_tcpClient->sendCAT("KP;");    // Paddle N/R orientation - mirror into local CW mapping
     m_tcpClient->sendCAT("PL;PL$;"); // FM PL/CTCSS state for both VFOs
     m_tcpClient->sendCAT("RP;");    // FM repeater mode and offset
@@ -6167,6 +6257,8 @@ void MainWindow::showPhoneControls() {
     if (!K4Styles::isCompactLayout() || !m_leftPanelScroll || !m_rightPanelScroll)
         return;
 
+    const bool wasAlreadyVisible = m_phoneControlsDialog && m_phoneControlsDialog->isVisible();
+
     // Keep the persistent CTRL drawer in sync if PHONE MIC was adjusted from
     // the Settings audio-input page since it was last opened.
     m_sideControlPanel->setPhoneMicGain(RadioSettings::instance()->micGain());
@@ -6351,13 +6443,70 @@ void MainWindow::showPhoneControls() {
                               available.bottom() - m_phoneControlsDialog->height() + 1);
     InWindowPopup::moveFromGlobal(m_phoneControlsDialog, drawerGlobal);
     m_phoneControlsDialog->show();
-    // The control widgets persist between openings.  Always begin at the
-    // operating controls—especially A/B AF—rather than reopening wherever a
-    // previous scroll ended.
-    m_leftPanelScroll->verticalScrollBar()->setValue(m_leftPanelScroll->verticalScrollBar()->minimum());
-    m_rightPanelScroll->verticalScrollBar()->setValue(m_rightPanelScroll->verticalScrollBar()->minimum());
+    // Begin a newly opened drawer at the operating controls. If an external
+    // knob is already driving a selected row, do not jump to the top again on
+    // every encoder report.
+    if (!wasAlreadyVisible) {
+        m_leftPanelScroll->verticalScrollBar()->setValue(m_leftPanelScroll->verticalScrollBar()->minimum());
+        m_rightPanelScroll->verticalScrollBar()->setValue(m_rightPanelScroll->verticalScrollBar()->minimum());
+    }
     m_phoneControlsDialog->raise();
     m_phoneControlsDialog->setFocus(Qt::OtherFocusReason);
+}
+
+void MainWindow::showPhoneControlAdjustment(const QString &action) {
+    if (!m_sideControlPanel || !m_leftPanelScroll)
+        return;
+    if (m_featureMenuBar && m_featureMenuBar->isMenuVisible())
+        m_featureMenuBar->hideMenu();
+
+    // RIT/XIT has its own always-visible row above the two scrolling banks.
+    if (action == QStringLiteral("rit_xit_frequency")) {
+        showPhoneControls();
+        return;
+    }
+
+    using Adjustment = SideControlPanel::Adjustment;
+    Adjustment adjustment = Adjustment::MainVolume;
+    if (action == QStringLiteral("main_volume")) adjustment = Adjustment::MainVolume;
+    else if (action == QStringLiteral("sub_volume")) adjustment = Adjustment::SubVolume;
+    else if (action == QStringLiteral("cw_speed")) {
+        if (!m_sideControlPanel->isCwDisplayMode())
+            return;
+        adjustment = Adjustment::CwSpeed;
+    }
+    else if (action == QStringLiteral("rf_power")) adjustment = Adjustment::RfPower;
+    else if (action == QStringLiteral("filter_bandwidth")) adjustment = Adjustment::FilterBandwidth;
+    else if (action == QStringLiteral("filter_shift")) adjustment = Adjustment::FilterShift;
+    else if (action == QStringLiteral("main_rf_gain")) adjustment = Adjustment::MainRfGain;
+    else if (action == QStringLiteral("main_squelch")) adjustment = Adjustment::MainSquelch;
+    else if (action == QStringLiteral("sub_squelch")) adjustment = Adjustment::SubSquelch;
+    else if (action == QStringLiteral("sub_rf_gain")) adjustment = Adjustment::SubRfGain;
+    else return;
+
+    m_sideControlPanel->selectAdjustment(adjustment);
+    QPointer<QWidget> control = m_sideControlPanel->adjustmentWidget(adjustment);
+    showPhoneControls();
+    if (control) {
+        QTimer::singleShot(0, this, [this, control]() {
+            if (control && m_leftPanelScroll)
+                m_leftPanelScroll->ensureWidgetVisible(control, 8, 8);
+        });
+    }
+}
+
+void MainWindow::showMidiAdjustmentSurface(const QString &action) {
+    if (action == QStringLiteral("attenuator_level")) {
+        showFeatureAdjustment(static_cast<int>(FeatureMenuBar::Attenuator));
+    } else if (action == QStringLiteral("noise_blanker_level")) {
+        showFeatureAdjustment(static_cast<int>(FeatureMenuBar::NbLevel));
+    } else if (action == QStringLiteral("nr_level")) {
+        showFeatureAdjustment(static_cast<int>(FeatureMenuBar::NrAdjust));
+    } else if (action == QStringLiteral("manual_notch_pitch")) {
+        showFeatureAdjustment(static_cast<int>(FeatureMenuBar::ManualNotch));
+    } else {
+        showPhoneControlAdjustment(action);
+    }
 }
 
 void MainWindow::showFrequencyEntry(bool vfoB) {
@@ -7607,6 +7756,467 @@ void MainWindow::executeMacro(const QString &functionId) {
     } else {
         qDebug() << "No macro configured for" << functionId;
     }
+}
+
+void MainWindow::executeMidiMacro(const QString &command) {
+    if (command.isEmpty() || !m_tcpClient || !m_tcpClient->isConnected())
+        return;
+    // A mapping owns one complete K4 command string. Do not combine it with
+    // any app macro or another button assignment.
+    m_tcpClient->sendCAT(command);
+}
+
+void MainWindow::handleMidiKnobAction(const QString &action, int value, bool absolute) {
+    if (action == QStringLiteral("disabled") || (!absolute && value == 0))
+        return;
+    if (action == QStringLiteral("selected_adjustment")) {
+        handleMidiKnobAction(m_midiSelectedKnobAction, value, absolute);
+        return;
+    }
+
+    const auto scaled = [absolute, value](int minimum, int maximum, int current, int step) {
+        if (absolute)
+            return minimum + qRound((maximum - minimum) * (value / 127.0));
+        return qBound(minimum, current + value * step, maximum);
+    };
+    const bool targetB = m_radioState->bSetEnabled();
+
+    if (action == QStringLiteral("main_volume") || action == QStringLiteral("sub_volume")) {
+        const bool sub = action == QStringLiteral("sub_volume");
+        const int current = sub ? RadioSettings::instance()->subVolume()
+                                : RadioSettings::instance()->volume();
+        const int next = scaled(0, 100, current, 1);
+        if (sub) {
+            RadioSettings::instance()->setSubVolume(next);
+            m_audioEngine->setSubVolume(next / 100.0f);
+            if (m_sideControlPanel)
+                m_sideControlPanel->setSubVolume(next);
+            if (m_bottomMenuBar)
+                m_bottomMenuBar->setSubVolumeValue(next);
+        } else {
+            RadioSettings::instance()->setVolume(next);
+            m_audioEngine->setMainVolume(next / 100.0f);
+            if (m_sideControlPanel)
+                m_sideControlPanel->setVolume(next);
+            if (m_bottomMenuBar)
+                m_bottomMenuBar->setMainVolumeValue(next);
+            m_midiMainVolumeBeforeMute = -1;
+        }
+        showMidiAdjustmentSurface(action);
+        showControlFeedback(QString("%1 VOLUME %2").arg(sub ? "SUB" : "MAIN").arg(next));
+        return;
+    }
+
+    if (action == QStringLiteral("waterfall_brightness")) {
+        m_midiWaterfallColorRange = scaled(5, 30, m_midiWaterfallColorRange, 1);
+        m_panadapterA->setWaterfallColorRange(m_midiWaterfallColorRange);
+        m_panadapterB->setWaterfallColorRange(m_midiWaterfallColorRange);
+        m_displayPopup->setWaterfallColorRange(m_midiWaterfallColorRange);
+        showControlFeedback(QString("WTR CLRS %1").arg(m_midiWaterfallColorRange));
+        return;
+    }
+
+    if (!m_tcpClient || !m_tcpClient->isConnected())
+        return;
+
+    if (action == QStringLiteral("other_vfo_frequency")) {
+        bool tuneB = targetB;
+        tuneB = !tuneB;
+
+        // Let the K4 apply the target VFO's current, mode-specific tuning
+        // step.  This avoids guessing from a stale or not-yet-received VT/VT$
+        // value and matches one physical tuning detent to one radio step.
+        const QString command = value > 0
+                                    ? (tuneB ? QStringLiteral("UPB;") : QStringLiteral("UP;"))
+                                    : (tuneB ? QStringLiteral("DNB;") : QStringLiteral("DN;"));
+        for (int index = 0; index < qMin(qAbs(value), 64); ++index)
+            m_tcpClient->sendCAT(command);
+        m_tcpClient->sendCAT(tuneB ? QStringLiteral("FB;") : QStringLiteral("FA;"));
+        return;
+    }
+
+    if (action == QStringLiteral("active_vfo_frequency")) {
+        const bool tuneB = targetB;
+        const quint64 current = tuneB ? m_radioState->vfoB() : m_radioState->vfoA();
+        // A physical controller follows the K4's current VT/VT$ tuning rate.
+        // Do not use the phone-only digit-selection step, which can be much
+        // larger than the step currently selected on the radio.
+        const int step = tuneB ? tuningStepToHz(m_radioState->tuningStepB())
+                               : tuningStepToHz(m_radioState->tuningStep());
+        const qint64 next = static_cast<qint64>(current)
+                            + static_cast<qint64>(value) * step;
+        if (next > 0) {
+            const QString command = QString("%1%2;")
+                                        .arg(tuneB ? "FB" : "FA")
+                                        .arg(next, 11, 10, QChar('0'));
+            m_tcpClient->sendCAT(command);
+            m_radioState->parseCATCommand(command);
+        }
+        return;
+    }
+
+    if (action == QStringLiteral("rit_xit_frequency")) {
+        // Match the front-panel workflow: reveal the RIT/XIT controls, ensure
+        // RIT is enabled deterministically, then apply the encoder movement.
+        // The operator can subsequently enable XIT from the visible drawer.
+        showMidiAdjustmentSurface(action);
+        const bool ritEnabled = targetB ? m_radioState->ritEnabledB()
+                                        : m_radioState->ritEnabled();
+        if (!ritEnabled) {
+            const QString enableCommand = targetB ? QStringLiteral("RT$1;")
+                                                  : QStringLiteral("RT1;");
+            m_tcpClient->sendCAT(enableCommand);
+            m_radioState->parseCATCommand(enableCommand);
+        }
+        const bool adjustB = targetB && !m_radioState->xitEnabled();
+        const QString command = value > 0 ? (adjustB ? QStringLiteral("RU$;") : QStringLiteral("RU;"))
+                                          : (adjustB ? QStringLiteral("RD$;") : QStringLiteral("RD;"));
+        for (int index = 0; index < qMin(qAbs(value), 64); ++index)
+            m_tcpClient->sendCAT(command);
+        return;
+    }
+
+    if (action == QStringLiteral("filter_bandwidth")) {
+        int minimum = 50;
+        int maximum = 5000;
+        const RadioState::Mode mode = targetB ? m_radioState->modeB() : m_radioState->mode();
+        const int dataMode = targetB ? m_radioState->dataSubModeB() : m_radioState->dataSubMode();
+        if ((mode == RadioState::DATA || mode == RadioState::DATA_R) && dataMode == 2) {
+            minimum = 150;
+            maximum = 800;
+        } else if ((mode == RadioState::DATA || mode == RadioState::DATA_R) && dataMode == 3) {
+            maximum = 200;
+        }
+        const int current = targetB ? m_radioState->filterBandwidthB()
+                                    : m_radioState->filterBandwidth();
+        // BW is expressed in 10 Hz units by the K4. Use that finest native
+        // increment so a physical dial can make precise passband changes.
+        const int next = scaled(minimum, maximum, qMax(current, minimum), 10);
+        const QString command = QString("BW%1%2;")
+                                    .arg(targetB ? "$" : "")
+                                    .arg(next / 10, 4, 10, QChar('0'));
+        m_tcpClient->sendCAT(command);
+        targetB ? m_radioState->setFilterBandwidthB(next)
+                : m_radioState->setFilterBandwidth(next);
+        showMidiAdjustmentSurface(action);
+        showControlFeedback(QString("%1 FILTER %2 Hz").arg(targetB ? "B" : "A").arg(next));
+        return;
+    }
+
+    if (action == QStringLiteral("filter_shift")) {
+        const RadioState::Mode mode = targetB ? m_radioState->modeB() : m_radioState->mode();
+        const int maximum = (mode == RadioState::CW || mode == RadioState::CW_R) ? 200 : 300;
+        const int current = targetB ? m_radioState->ifShiftB() : m_radioState->ifShift();
+        const int next = scaled(30, maximum, qMax(current, 30), 1);
+        const QString command = QString("IS%1+%2;")
+                                    .arg(targetB ? "$" : "")
+                                    .arg(next, 4, 10, QChar('0'));
+        m_tcpClient->sendCAT(command);
+        targetB ? m_radioState->setIfShiftB(next) : m_radioState->setIfShift(next);
+        showMidiAdjustmentSurface(action);
+        showControlFeedback(QString("%1 SHIFT %2").arg(targetB ? "B" : "A").arg(next));
+        return;
+    }
+
+    if (action == QStringLiteral("attenuator_level")) {
+        const int current = targetB ? m_radioState->attenuatorLevelB()
+                                    : m_radioState->attenuatorLevel();
+        int next = scaled(0, 21, current, 3);
+        next = qBound(0, qRound(next / 3.0) * 3, 21);
+        const int direction = next >= current ? 1 : -1;
+        const QString command = direction > 0 ? (targetB ? QStringLiteral("RA$+;")
+                                                         : QStringLiteral("RA+;"))
+                                               : (targetB ? QStringLiteral("RA$-;")
+                                                          : QStringLiteral("RA-;"));
+        for (int index = 0; index < qAbs(next - current) / 3; ++index)
+            m_tcpClient->sendCAT(command);
+        targetB ? m_radioState->setAttenuatorLevelB(next)
+                : m_radioState->setAttenuatorLevel(next);
+        showMidiAdjustmentSurface(action);
+        return;
+    }
+
+    if (action == QStringLiteral("noise_blanker_level")) {
+        const int current = targetB ? m_radioState->noiseBlankerLevelB()
+                                    : m_radioState->noiseBlankerLevel();
+        const int next = scaled(0, 15, current, 1);
+        const int enabled = targetB ? (m_radioState->noiseBlankerEnabledB() ? 1 : 0)
+                                    : (m_radioState->noiseBlankerEnabled() ? 1 : 0);
+        const int filter = targetB ? m_radioState->noiseBlankerFilterWidthB()
+                                   : m_radioState->noiseBlankerFilterWidth();
+        const QString prefix = targetB ? QStringLiteral("NB$") : QStringLiteral("NB");
+        m_tcpClient->sendCAT(QString("%1%2%3%4;")
+                                 .arg(prefix)
+                                 .arg(next, 2, 10, QChar('0'))
+                                 .arg(enabled)
+                                 .arg(filter));
+        targetB ? m_radioState->setNoiseBlankerLevelB(next)
+                : m_radioState->setNoiseBlankerLevel(next);
+        showMidiAdjustmentSurface(action);
+        return;
+    }
+
+    if (action == QStringLiteral("nr_level")) {
+        const bool ssnr = targetB ? (m_radioState->ssnrEnabledB()
+                                     && !m_radioState->noiseReductionEnabledB())
+                                  : (m_radioState->ssnrEnabled()
+                                     && !m_radioState->noiseReductionEnabled());
+        const int current = ssnr ? (targetB ? m_radioState->ssnrLevelB()
+                                             : m_radioState->ssnrLevel())
+                                 : (targetB ? m_radioState->noiseReductionLevelB()
+                                            : m_radioState->noiseReductionLevel());
+        const int next = scaled(0, ssnr ? 20 : 10, current, 1);
+        const bool enabled = ssnr ? (targetB ? m_radioState->ssnrEnabledB()
+                                              : m_radioState->ssnrEnabled())
+                                  : (targetB ? m_radioState->noiseReductionEnabledB()
+                                             : m_radioState->noiseReductionEnabled());
+        const QString prefix = QString("%1%2").arg(ssnr ? "NRS" : "NR", targetB ? "$" : "");
+        m_tcpClient->sendCAT(QString("%1%2%3;")
+                                 .arg(prefix)
+                                 .arg(next, 2, 10, QChar('0'))
+                                 .arg(enabled ? 1 : 0));
+        if (ssnr)
+            targetB ? m_radioState->setSsnrLevelB(next) : m_radioState->setSsnrLevel(next);
+        else
+            targetB ? m_radioState->setNoiseReductionLevelB(next)
+                    : m_radioState->setNoiseReductionLevel(next);
+        showMidiAdjustmentSurface(action);
+        return;
+    }
+
+    if (action == QStringLiteral("manual_notch_pitch")) {
+        const int current = targetB ? m_radioState->manualNotchPitchB()
+                                    : m_radioState->manualNotchPitch();
+        const int next = scaled(150, 5000, qMax(current, 150), 10);
+        const int enabled = targetB ? (m_radioState->manualNotchEnabledB() ? 1 : 0)
+                                    : (m_radioState->manualNotchEnabled() ? 1 : 0);
+        const QString prefix = targetB ? QStringLiteral("NM$") : QStringLiteral("NM");
+        m_tcpClient->sendCAT(QString("%1%2%3;")
+                                 .arg(prefix)
+                                 .arg(next, 4, 10, QChar('0'))
+                                 .arg(enabled));
+        targetB ? m_radioState->setManualNotchPitchB(next)
+                : m_radioState->setManualNotchPitch(next);
+        showMidiAdjustmentSurface(action);
+        return;
+    }
+
+    if (action == QStringLiteral("main_squelch") || action == QStringLiteral("sub_squelch")) {
+        const bool sub = action == QStringLiteral("sub_squelch");
+        const int current = sub ? m_radioState->squelchLevelB() : m_radioState->squelchLevel();
+        const int next = scaled(0, 29, current, 1);
+        m_tcpClient->sendCAT(QString("SQ%1%2;")
+                                 .arg(sub ? "$" : "")
+                                 .arg(next, 3, 10, QChar('0')));
+        sub ? m_radioState->setSquelchLevelB(next) : m_radioState->setSquelchLevel(next);
+        showMidiAdjustmentSurface(action);
+        return;
+    }
+
+    if (action == QStringLiteral("main_rf_gain") || action == QStringLiteral("sub_rf_gain")) {
+        const bool sub = action == QStringLiteral("sub_rf_gain");
+        const int current = sub ? m_radioState->rfGainB() : m_radioState->rfGain();
+        // The K4 RG value is attenuation: turning the user-facing RF gain up
+        // reduces the numeric value, matching the existing touch control.
+        const int next = absolute ? 60 - qRound(60.0 * value / 127.0)
+                                  : qBound(0, current - value, 60);
+        m_tcpClient->sendCAT(QString("RG%1-%2;")
+                                 .arg(sub ? "$" : "")
+                                 .arg(next, 2, 10, QChar('0')));
+        sub ? m_radioState->setRfGainB(next) : m_radioState->setRfGain(next);
+        showMidiAdjustmentSurface(action);
+        return;
+    }
+
+    if (action == QStringLiteral("rf_power")) {
+        const double current = qMax(0.1, m_radioState->rfPower());
+        const double next = absolute ? 0.1 + (109.9 * value / 127.0)
+                                     : qBound(0.1, current + value * (current <= 10.0 ? 0.1 : 1.0), 110.0);
+        if (next <= 10.0)
+            m_tcpClient->sendCAT(QString("PC%1L;").arg(qRound(next * 10), 3, 10, QChar('0')));
+        else
+            m_tcpClient->sendCAT(QString("PC%1H;").arg(qRound(next), 3, 10, QChar('0')));
+        m_radioState->setRfPower(next);
+        showMidiAdjustmentSurface(action);
+        showControlFeedback(QString("POWER %1 W").arg(next, 0, 'f', next <= 10.0 ? 1 : 0));
+        return;
+    }
+
+    if (action == QStringLiteral("cw_speed")) {
+        const int next = scaled(8, 40, qMax(8, m_radioState->keyerSpeed()), 1);
+        m_tcpClient->sendCAT(QString("KS%1;").arg(next, 3, 10, QChar('0')));
+        m_radioState->setKeyerSpeed(next);
+        showMidiAdjustmentSurface(action);
+        showControlFeedback(QString("CW SPEED %1 WPM").arg(next));
+        return;
+    }
+
+    if (action == QStringLiteral("pan_zoom")) {
+        int &pendingSpan = targetB ? m_midiPanZoomPendingSpanB
+                                   : m_midiPanZoomPendingSpanA;
+        int &generation = targetB ? m_midiPanZoomGenerationB
+                                  : m_midiPanZoomGenerationA;
+        quint64 &anchorFrequency = targetB ? m_midiPanZoomAnchorFrequencyB
+                                           : m_midiPanZoomAnchorFrequencyA;
+        int &anchorStepHz = targetB ? m_midiPanZoomAnchorStepBHz
+                                    : m_midiPanZoomAnchorStepAHz;
+        const int radioSpan = targetB ? m_radioState->spanHzB()
+                                      : m_radioState->spanHz();
+        if (pendingSpan <= 0) {
+            anchorFrequency = targetB ? m_radioState->vfoB() : m_radioState->vfoA();
+            anchorStepHz = tuningStepToHz(targetB ? m_radioState->tuningStepB()
+                                                   : m_radioState->tuningStep());
+        }
+        const int current = pendingSpan > 0 ? pendingSpan
+                                            : (radioSpan > 0 ? radioSpan : 50000);
+        int next = current;
+        for (int index = 0; index < qAbs(value); ++index)
+            next = value > 0 ? getNextSpanUp(next) : getNextSpanDown(next);
+        if (next != current) {
+            pendingSpan = next;
+            targetB ? m_radioState->setSpanHzB(next) : m_radioState->setSpanHz(next);
+            showControlFeedback(QString("%1 PAN SPAN %2 kHz")
+                                    .arg(targetB ? "B" : "A")
+                                    .arg(next / 1000.0, 0, 'f', 1));
+
+            const int requestedGeneration = ++generation;
+            QTimer::singleShot(120, this, [this, targetB, requestedGeneration]() {
+                int &activeGeneration = targetB ? m_midiPanZoomGenerationB
+                                                : m_midiPanZoomGenerationA;
+                if (requestedGeneration != activeGeneration)
+                    return;
+
+                int &activePendingSpan = targetB ? m_midiPanZoomPendingSpanB
+                                                 : m_midiPanZoomPendingSpanA;
+                quint64 &activeAnchorFrequency = targetB ? m_midiPanZoomAnchorFrequencyB
+                                                         : m_midiPanZoomAnchorFrequencyA;
+                int &activeAnchorStepHz = targetB ? m_midiPanZoomAnchorStepBHz
+                                                  : m_midiPanZoomAnchorStepAHz;
+                const int finalSpan = activePendingSpan;
+                const quint64 anchorFrequency = activeAnchorFrequency;
+                const int anchorStepHz = qMax(1, activeAnchorStepHz);
+                activePendingSpan = 0;
+                activeAnchorFrequency = 0;
+                if (finalSpan <= 0 || !m_tcpClient || !m_tcpClient->isConnected())
+                    return;
+
+                // SPN is the same command used by the on-screen +/- controls.
+                // Send one command when the physical turn settles instead of
+                // flooding the K4 with every intermediate slider position.
+                m_tcpClient->sendCAT(QString("#SPN%1%2;")
+                                         .arg(targetB ? "$" : "")
+                                         .arg(finalSpan));
+
+                // Match the normal panadapter interaction: keep the frequency
+                // that was under the VFO cursor when zoom began, aligned to
+                // the active radio tuning rate.  This deliberately does not
+                // send FC/FI (which would move the pan center) or VT (which
+                // would change the operator's selected rate).
+                if (anchorFrequency > 0) {
+                    const quint64 snappedFrequency =
+                        ((anchorFrequency + static_cast<quint64>(anchorStepHz / 2))
+                         / static_cast<quint64>(anchorStepHz))
+                        * static_cast<quint64>(anchorStepHz);
+                    const QString frequencyCommand = QString("%1%2;")
+                                                         .arg(targetB ? "FB" : "FA")
+                                                         .arg(snappedFrequency, 11, 10, QChar('0'));
+                    m_tcpClient->sendCAT(frequencyCommand);
+                    m_radioState->parseCATCommand(frequencyCommand);
+                }
+            });
+        }
+        return;
+    }
+
+    if (action == QStringLiteral("pan_reference_level")) {
+        const int rawCurrent = targetB ? m_radioState->refLevelB() : m_radioState->refLevel();
+        const int current = rawCurrent < -200 ? -110 : rawCurrent;
+        const int next = scaled(-140, 10, current, 1);
+        m_tcpClient->sendCAT(QString("#REF%1%2;").arg(targetB ? "$" : "").arg(next));
+        targetB ? m_radioState->setRefLevelB(next) : m_radioState->setRefLevel(next);
+        showControlFeedback(QString("%1 PAN REF %2 dBm").arg(targetB ? "B" : "A").arg(next));
+    }
+}
+
+void MainWindow::handleMidiButtonAction(const QString &action) {
+    if (action == QStringLiteral("disabled"))
+        return;
+    const QString selectedAction = MidiMapping::knobActionForButtonAction(action);
+    if (!selectedAction.isEmpty()) {
+        m_midiSelectedKnobAction = selectedAction;
+        showMidiAdjustmentSurface(selectedAction);
+        showControlFeedback(QString("CTR2 KNOB: %1")
+                                .arg(MidiMapping::knobActionLabel(selectedAction).toUpper()));
+        return;
+    }
+    if (action == QStringLiteral("main_mute")) {
+        const int current = RadioSettings::instance()->volume();
+        const int next = current > 0 ? 0 : qMax(1, m_midiMainVolumeBeforeMute);
+        if (current > 0)
+            m_midiMainVolumeBeforeMute = current;
+        RadioSettings::instance()->setVolume(next);
+        m_audioEngine->setMainVolume(next / 100.0f);
+        if (m_sideControlPanel)
+            m_sideControlPanel->setVolume(next);
+        if (m_bottomMenuBar)
+            m_bottomMenuBar->setMainVolumeValue(next);
+        showControlFeedback(next == 0 ? QStringLiteral("MAIN AUDIO MUTED")
+                                      : QStringLiteral("MAIN AUDIO RESTORED"));
+        return;
+    }
+    if (action == QStringLiteral("tx_rx_toggle")) {
+        if (!m_tcpClient || !m_tcpClient->isConnected())
+            return;
+        if (m_sstvTxActive || m_sstvTxStarting) {
+            showControlFeedback("SSTV TRANSMIT ACTIVE — USE STOP SSTV");
+            return;
+        }
+        const bool goTx = !(m_pttActive || m_radioState->isTransmitting());
+        if (goTx) {
+            onPttPressed();
+            // Permission denial can cancel Android PTT before it becomes active.
+            if (!m_pttActive)
+                return;
+        } else {
+            onPttReleased();
+        }
+        showControlFeedback(goTx ? QStringLiteral("TRANSMIT ON")
+                                 : QStringLiteral("RECEIVE"));
+        return;
+    }
+    if (!m_tcpClient || !m_tcpClient->isConnected())
+        return;
+
+    const bool targetB = m_radioState->bSetEnabled();
+    QString command;
+    if (action == QStringLiteral("mode_next")) command = targetB ? "MD$+;" : "MD+;";
+    else if (action == QStringLiteral("mode_previous")) command = targetB ? "MD$-;" : "MD-;";
+    else if (action == QStringLiteral("band_up")) command = targetB ? "BN$+;" : "BN+;";
+    else if (action == QStringLiteral("band_down")) command = targetB ? "BN$-;" : "BN-;";
+    else if (action == QStringLiteral("nr_toggle")) command = QStringLiteral("SW62;");
+    else if (action == QStringLiteral("attenuator_toggle")) command = targetB ? "RA$/;" : "RA/;";
+    else if (action == QStringLiteral("noise_blanker_toggle")) command = targetB ? "NB$/;" : "NB/;";
+    else if (action == QStringLiteral("manual_notch_toggle")) command = targetB ? "NM$/;" : "NM/;";
+    else if (action == QStringLiteral("rit_toggle")) command = targetB ? "RT$/;" : "RT/;";
+    else if (action == QStringLiteral("split_toggle")) command = QStringLiteral("FT/;");
+    else if (action == QStringLiteral("tune_step")) command = targetB ? "VT$/;" : "VT/;";
+    else if (action == QStringLiteral("khz")) command = targetB ? "VT$\\;" : "VT\\;";
+    else if (action == QStringLiteral("tune")) command = QStringLiteral("SW16;");
+    else if (action == QStringLiteral("pan_zoom_in") || action == QStringLiteral("pan_zoom_out")) {
+        const int current = targetB ? m_radioState->spanHzB() : m_radioState->spanHz();
+        const int safeCurrent = current > 0 ? current : 50000;
+        const int next = action == QStringLiteral("pan_zoom_in")
+                             ? getNextSpanDown(safeCurrent) : getNextSpanUp(safeCurrent);
+        if (next != current) {
+            command = QString("#SPN%1%2;").arg(targetB ? "$" : "").arg(next);
+            targetB ? m_radioState->setSpanHzB(next) : m_radioState->setSpanHz(next);
+            showControlFeedback(QString("%1 PAN SPAN %2 kHz")
+                                    .arg(targetB ? "B" : "A")
+                                    .arg(next / 1000.0, 0, 'f', 1));
+        }
+    }
+    if (!command.isEmpty())
+        m_tcpClient->sendCAT(command);
 }
 
 void MainWindow::openMacroDialog() {

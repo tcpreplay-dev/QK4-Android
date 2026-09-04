@@ -1,6 +1,6 @@
 # CTR2-MIDI integration scope
 
-Status: planned; resume from this document before implementation.
+Status: implemented on `codex/ctr2-midi-v2`; awaiting physical-device validation.
 
 Reference: CTR2-MIDI Operation Manual v2.01.01a:
 https://ctr2.lynovation.com/wp-content/uploads/2026/03/CTR2-MIDI_Operation_Manual_v20101a.pdf
@@ -33,29 +33,28 @@ works instead of reducing every encoder report to one tuning step.
 - Recognize normal CTR2 BLE names such as `CTR2_####` and accommodate the USB
   ESP32-S3/XIAO identity exposed by Android.
 - Remember the selected transport and physical-device identity.
-- Remember the user's CTR2 control mappings per physical device.
-- Provide CTR2 defaults, Restore CTR2 Defaults, and MIDI Learn for modified or
-  unusual configurations.
+- Remember the independently selected CW and CTR2 device endpoints.
+- Remember the active CTR2 mapping and provide Restore Defaults plus complete
+  mapping-file save/load in Android-accessible document storage.
+- Loading replaces the complete mapping; mappings are never merged. Warn and
+  offer Save / Don't Save / Cancel only when the current mapping has pending edits.
 
 ## Device-specific keying modes
 
 Keying capabilities are profile-specific, not universal across MIDI devices:
 
-- TinyMidi: paddles only. Do not expose straight-key mode.
-- HaliKey MIDI: selectable Paddles or Straight Key / External Keyer. In
+- TinyMIDI and HaliKey MIDI: selectable Paddles or Straight Key / External Keyer. In
   straight-key mode, let the user select the left or right physical input and
   ignore the unused input.
 - CTR2-MIDI: selectable Paddles or Straight Key + PTT, following the CTR2
   paddle-jack modes and allowing TIP/RING assignment to be swapped.
-- Custom profile: do not expose straight-key behavior by default; it must be
-  explicitly configured as a supported input capability.
+- Custom MIDI: uses the same selectable keying mode after its physical DIT/DAH
+  inputs have been learned.
 
 Paddle/iambic input continues through QK4 Mobile's existing local iambic keyer
 and K4 `KZ` paddle stream. Straight-key or external-keyer input bypasses the
 local iambic element generator and preserves the incoming key-down/key-up
-timing using the K4 `KZ` raw key elements. Verify the precise indefinite
-key-down/release sequence against current upstream QK4 and the K4 Programmer's
-Reference before implementation.
+timing using the documented K4 `KZD0000;` and `KZU0000;` raw key elements.
 
 The K4's CW VOX (hit-the-key), QSK, and DLY settings continue to control
 transmit and receive behavior. Do not force CW VOX or any other operator
@@ -83,6 +82,13 @@ Support both CTR2 button layouts:
 - Allow every action to map to an applicable K4 command or an existing local
   QK4 function. Do not replace local implementations such as GEN with a radio
   command.
+- Provide typed `Adjust:` button actions for every predefined continuous knob
+  action. A knob assigned to **Selected adjustment (button)** follows the last
+  such button selection, matching the radio-like workflow where a control is
+  selected and the wheel then adjusts it. This is independent of fixed knob
+  assignments and does not change the supplied K4-Control defaults.
+- Provide a predefined **TX/RX toggle** button action using QK4 Mobile's
+  deliberate PTT path; do not emulate it with VOX.
 
 ## Knob controls
 
@@ -91,20 +97,28 @@ Support all four CTR2 knob modes and both actions in each mode:
 - Turn: CC 100, 102, 104, and 106
 - Push and turn: CC 101, 103, 105, and 107
 
-Suggested QK4 default mapping:
+Initial mapping (matching the supplied K4-Control map):
 
 | CTR2 action | QK4 default |
 |---|---|
 | Home turn | Active VFO tuning |
-| Home push-turn | RIT/XIT adjustment |
-| Mode 1 turn | Main AF gain |
-| Mode 1 push-turn | Sub AF gain |
-| Mode 2 turn | Filter bandwidth |
-| Mode 2 push-turn | Filter shift |
+| Home push-turn | Main AF gain |
+| Mode 1 turn | Other VFO tuning |
+| Mode 1 push-turn | Filter bandwidth |
+| Mode 2 turn | RIT/XIT adjustment |
+| Mode 2 push-turn | Noise-reduction level |
 | Mode 3 turn | RF power |
-| Mode 3 push-turn | CW speed in CW; mode-appropriate alternate elsewhere |
+| Mode 3 push-turn | CW speed |
 
 All eight assignments remain user-configurable.
+
+CTR2 Map 1 defines CC100 as the speed-sensitive WheelA control and CC101-107 as
+absolute SliderA controls. The supplied mapping therefore uses SliderA pickup
+for those seven modes and converts every changed position report to exactly one
+signed step; the first sample and duplicates do not create movement. Skipped or
+coalesced position counts must not multiply the radio-control step. Device tests
+of CC102-CC106 confirmed that using raw position differences, or treating these
+positions as centered WheelA values, causes large or reversed adjustments.
 
 Support every documented knob-output format:
 
@@ -121,11 +135,22 @@ value or require meaningful movement before applying a new absolute value.
 
 ## Setup UX and feedback
 
-- Base CTR2 setup on the current working CW Keyer MIDI discovery/profile
-  screen rather than creating a disconnected setup path.
+- Provide a dedicated **CTR2** tab, while retaining the complete v1.0.3 CW
+  Keyer tab and behavior as a separate device role.
 - Keep controls touch-sized and vertically scrollable without horizontal pan.
 - Ensure scrolling does not capture slider or learn-control gestures.
+- A predefined wheel action must use the same visible adjustment path as the
+  equivalent QK4 touch control. ATTN, NB LEVEL, NR ADJUST, and NTCH MANUAL use
+  their existing compact adjustment panels. Volume, filter bandwidth/shift,
+  RF power, CW speed, Main/Sub squelch, and Main/Sub RF gain select and reveal
+  their existing controls in the K4 Controls drawer. Values already evident on
+  the live console, such as VFO frequency and panadapter span, retain that
+  visible main-screen feedback. Opaque user-entered K4 commands cannot select
+  a semantic surface automatically.
 - Show a visible saved confirmation when mappings change.
+- When **Return to Operate** is pressed with pending CTR2 mapping edits, offer
+  **Apply**, **Abandon**, and **Cancel** before leaving setup. Leave immediately
+  without prompting when the mapping is unchanged.
 - Keep all live console controls, meters, panadapter, and PTT immediately
   recoverable after closing setup.
 
@@ -135,10 +160,12 @@ value or require meaningful movement before applying a new absolute value.
 - Normal and Extended button layouts, including short/long release behavior
 - All eight knob actions with Button, SliderA, SliderB, WheelA, WheelB, and
   WheelB-r formats
+- Fixed knob actions and button-selected adjustment mode open the correct QK4
+  adjustment surface and keep its value synchronized while the wheel moves
 - Slow, Normal, and Fast WheelA proportional tuning without lost magnitude
 - Iambic paddle timing over USB and BLE
 - CTR2 straight key and PTT with TIP/RING swapped both ways
 - HaliKey paddle and straight-key/external-keyer modes
-- TinyMidi remains paddle-only
+- TinyMIDI paddle and straight-key/external-keyer modes
 - K4 CW VOX on/off, QSK, and DLY behavior without connection-side mutation
 - TEST TX first for keying/PTT safety, followed by controlled on-air validation

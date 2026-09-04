@@ -499,6 +499,22 @@ void RadioState::setMonitorLevel(int mode, int level) {
     }
 }
 
+void RadioState::setAttenuatorLevel(int level) {
+    level = qBound(0, level, 21);
+    if (m_attenuatorLevel != level) {
+        m_attenuatorLevel = level;
+        emit processingChanged();
+    }
+}
+
+void RadioState::setAttenuatorLevelB(int level) {
+    level = qBound(0, level, 21);
+    if (m_attenuatorLevelB != level) {
+        m_attenuatorLevelB = level;
+        emit processingChangedB();
+    }
+}
+
 void RadioState::setNoiseBlankerLevel(int level) {
     if (m_noiseBlankerLevel != level) {
         m_noiseBlankerLevel = qMin(level, 15);

@@ -10,6 +10,8 @@ private slots:
     void transmitQueryConfirmsState();
     void malformedTransmitQueryIsIgnored();
     void reverseDataSubModesUseDistinctDisplayLabels();
+    void attenuatorLevelSettersClampAndNotify();
+    void vfoTuningStepsRemainIndependent();
 };
 
 void RadioStateTest::transmitQueryConfirmsState() {
@@ -63,6 +65,44 @@ void RadioStateTest::reverseDataSubModesUseDistinctDisplayLabels() {
     QCOMPARE(state.modeStringFullB(), QStringLiteral("AFSK-R"));
     state.parseCATCommand(QStringLiteral("MD$6;"));
     QCOMPARE(state.modeStringFullB(), QStringLiteral("AFSK"));
+}
+
+void RadioStateTest::attenuatorLevelSettersClampAndNotify() {
+    RadioState state;
+    QSignalSpy mainSpy(&state, &RadioState::processingChanged);
+    QSignalSpy subSpy(&state, &RadioState::processingChangedB);
+
+    state.setAttenuatorLevel(9);
+    QCOMPARE(state.attenuatorLevel(), 9);
+    QCOMPARE(mainSpy.count(), 1);
+    state.setAttenuatorLevel(99);
+    QCOMPARE(state.attenuatorLevel(), 21);
+    QCOMPARE(mainSpy.count(), 2);
+
+    state.setAttenuatorLevelB(-4);
+    QCOMPARE(state.attenuatorLevelB(), 0);
+    QCOMPARE(subSpy.count(), 0); // The default is already zero.
+    state.setAttenuatorLevelB(6);
+    QCOMPARE(state.attenuatorLevelB(), 6);
+    QCOMPARE(subSpy.count(), 1);
+}
+
+void RadioStateTest::vfoTuningStepsRemainIndependent() {
+    RadioState state;
+    QSignalSpy mainSpy(&state, &RadioState::tuningStepChanged);
+    QSignalSpy subSpy(&state, &RadioState::tuningStepBChanged);
+
+    state.parseCATCommand(QStringLiteral("VT2;"));
+    state.parseCATCommand(QStringLiteral("VT$3;"));
+    QCOMPARE(state.tuningStep(), 2);
+    QCOMPARE(state.tuningStepB(), 3);
+    QCOMPARE(mainSpy.count(), 1);
+    QCOMPARE(subSpy.count(), 1);
+
+    // Current K4 responses append the mode after the step digit.
+    state.parseCATCommand(QStringLiteral("VT$34;"));
+    QCOMPARE(state.tuningStepB(), 3);
+    QCOMPARE(subSpy.count(), 1);
 }
 
 QTEST_MAIN(RadioStateTest)

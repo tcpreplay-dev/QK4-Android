@@ -1,8 +1,22 @@
 # Project status
 
-Last updated: 2026-09-02
+Last updated: 2026-09-03
 
 ## Released build
+
+**QK4 Mobile v1.0.4** adds a dedicated CTR2-MIDI setup and preserves the
+existing CW Keyer workflow as a separate, simultaneous USB/Bluetooth MIDI
+device role. Operators can customize all CTR2 knob modes and independent
+short/long button actions, use on-screen QK4 adjustments and feedback, assign
+predefined radio actions or exact K4 commands, and save or load portable CTR2
+mapping files. F1-F8 labels and commands can likewise be saved and loaded in
+user-editable files. Straight-key and external-keyer input with local sidetone
+is available for TinyMIDI, HaliKey MIDI, learnable Custom MIDI, and CTR2-MIDI.
+Radio-control mappings, custom commands, TinyMIDI/CTR2 straight-key operation,
+and CTR2 USB/BLE disconnect and reconnect behavior passed physical testing on
+the Samsung Galaxy S26 Ultra with an Elecraft K4. All nine current native test
+targets pass. Android version code is 30, and the WorldWideDX-signed ARM64 APK
+was signature-verified, installed, and cold-launched.
 
 **QK4 Mobile v1.0.3** balances weak-signal SSTV recovery with stronger false-
 start rejection. A damaged-header recovery remains provisional until three
@@ -169,14 +183,6 @@ the compact layout; broader device validation is still required.
   CAT command because it maps the application's local waterfall LUT.
 
 ## Known boundaries / next validation
-
-### Next-build enhancements
-
-- Add CTR2 MIDI support. Confirm the CTR2 MIDI transport, messages, control
-  mapping, discovery, persistence, and touch-setup requirements against the
-  device documentation before implementation. The completed functional scope,
-  device-specific keying boundaries, mappings, and validation checklist are in
-  `docs/CTR2_MIDI_SCOPE.md`; resume from that document.
 
 ### Included in v1.0
 

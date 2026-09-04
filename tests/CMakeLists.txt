@@ -27,6 +27,26 @@ target_include_directories(test_radiostate PRIVATE ../src)
 target_link_libraries(test_radiostate PRIVATE Qt6::Core Qt6::Test)
 add_test(NAME radiostate COMMAND test_radiostate)
 
+qt_add_executable(test_midimapping
+    test_midimapping.cpp
+    ../src/hardware/midimapping.cpp
+    ../src/hardware/midimapping.h
+    ../src/hardware/midiinputrouter.cpp
+    ../src/hardware/midiinputrouter.h
+)
+target_include_directories(test_midimapping PRIVATE ../src)
+target_link_libraries(test_midimapping PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME midimapping COMMAND test_midimapping)
+
+qt_add_executable(test_fnkeymemory
+    test_fnkeymemory.cpp
+    ../src/settings/fnkeymemory.cpp
+    ../src/settings/fnkeymemory.h
+)
+target_include_directories(test_fnkeymemory PRIVATE ../src)
+target_link_libraries(test_fnkeymemory PRIVATE Qt6::Core Qt6::Test)
+add_test(NAME fnkeymemory COMMAND test_fnkeymemory)
+
 qt_add_executable(test_modepopupwidget
     test_modepopupwidget.cpp
     ../src/ui/modepopupwidget.cpp
@@ -85,7 +105,7 @@ target_link_libraries(test_sstvstorage PRIVATE Qt6::Core Qt6::Gui Qt6::Test)
 add_test(NAME sstvstorage COMMAND test_sstvstorage)
 
 cmake_path(GET CMAKE_CXX_COMPILER PARENT_PATH compiler_runtime_dir)
-set_tests_properties(frequencyentryparser frequencydisplaywidget radiostate modepopupwidget sstvencoder sstvcomposer sstvstorage PROPERTIES
+set_tests_properties(frequencyentryparser frequencydisplaywidget radiostate midimapping fnkeymemory modepopupwidget sstvencoder sstvcomposer sstvstorage PROPERTIES
     ENVIRONMENT_MODIFICATION
         "PATH=path_list_prepend:$<TARGET_FILE_DIR:Qt6::Core>"
         "PATH=path_list_prepend:${compiler_runtime_dir}"

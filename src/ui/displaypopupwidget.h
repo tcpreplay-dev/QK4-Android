@@ -57,6 +57,7 @@ public slots:
     // Waterfall height percentage (0-100, default 50 = 50/50 split)
     void setWaterfallHeight(int percent);    // LCD: #WFHxx;
     void setWaterfallHeightExt(int percent); // EXT: #HWFHxx;
+    void setWaterfallColorRange(int range);  // local WTR CLRS: 5-30
 
 signals:
     // Note: closed() signal is inherited from K4PopupBase

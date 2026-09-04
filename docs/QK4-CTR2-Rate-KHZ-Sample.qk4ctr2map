@@ -1,0 +1,193 @@
+{
+    "_comments": [
+        "This is a user-editable QK4 CTR2 mapping. Action keywords are case-sensitive.",
+        "For a predefined button function, copy a keyword from _buttonActions into the button's action field and remove its macro field.",
+        "For a custom K4 programmer command, use action \"macro\", set the button's macro field to an id, and define that id in macros. Commands must end with a semicolon.",
+        "The adjust_* button actions select the function controlled by a knob whose action is selected_adjustment.",
+        "A knob's output describes the MIDI messages emitted by that CTR2 knob mode; it does not select the radio action. The output keyword must match the output configured on the CTR2. See _knobOutputs.",
+        "Loading replaces the complete CTR2 mapping; mappings are never merged."
+    ],
+    "_knobOutputGuide": [
+        "Stock K4-Control Map 1: leave CC100 set to wheelA and CC101 through CC107 set to sliderA. No output selection is required unless you reprogram those modes in CTR2-MIDI.",
+        "To choose an output, inspect that knob mode in the CTR2-MIDI map/setup and copy its output type here: Wheel A = wheelA, Wheel B = wheelB, Slider A = sliderA, Slider B = sliderB, or MIDI Button = button.",
+        "Use wheelA when the CTR2 mode emits relative values centered on 64. It is the best choice for VFO tuning or another action where faster turns should produce larger changes, but only when the CTR2 mode itself is configured as Wheel A.",
+        "Use wheelB when the CTR2 mode emits relative direction values 1 and 126. It produces one fine step per report. Use wheelB-r instead only when Wheel B moves the selected QK4 action in the wrong direction.",
+        "Use sliderA or sliderB when the CTR2 mode emits absolute values from 0 through 127. QK4 converts changes in those values into fine directional steps; it does not jump the radio control to an absolute position.",
+        "Do not choose slider merely because the QK4 control is drawn as a slider, and do not choose wheel merely because the CTR2 has a physical knob. The MIDI message format configured in CTR2-MIDI is what determines this field."
+    ],
+    "_buttonActions": {
+        "adjust_active_vfo_frequency": "Adjust: Active VFO frequency",
+        "adjust_attenuator_level": "Adjust: Attenuator",
+        "adjust_cw_speed": "Adjust: CW speed",
+        "adjust_filter_bandwidth": "Adjust: Filter bandwidth",
+        "adjust_filter_shift": "Adjust: Filter shift",
+        "adjust_main_rf_gain": "Adjust: Main RF gain",
+        "adjust_main_squelch": "Adjust: Main squelch",
+        "adjust_main_volume": "Adjust: Main volume",
+        "adjust_manual_notch_pitch": "Adjust: Manual notch",
+        "adjust_noise_blanker_level": "Adjust: Noise blanker",
+        "adjust_nr_level": "Adjust: Noise reduction",
+        "adjust_other_vfo_frequency": "Adjust: Other VFO frequency",
+        "adjust_pan_reference_level": "Adjust: Panadapter reference",
+        "adjust_pan_zoom": "Adjust: Panadapter zoom",
+        "adjust_rf_power": "Adjust: RF power",
+        "adjust_rit_xit_frequency": "Adjust: RIT/XIT frequency",
+        "adjust_sub_rf_gain": "Adjust: Sub RF gain",
+        "adjust_sub_squelch": "Adjust: Sub squelch",
+        "adjust_sub_volume": "Adjust: Sub volume",
+        "adjust_waterfall_brightness": "Adjust: Waterfall brightness",
+        "attenuator_toggle": "Attenuator toggle",
+        "band_down": "Band down",
+        "band_up": "Band up",
+        "disabled": "Disabled",
+        "khz": "KHZ",
+        "main_mute": "Main mute",
+        "manual_notch_toggle": "Manual notch toggle",
+        "mode_next": "Mode next",
+        "mode_previous": "Mode previous",
+        "noise_blanker_toggle": "Noise blanker toggle",
+        "nr_toggle": "NR toggle",
+        "pan_zoom_in": "Pan zoom in",
+        "pan_zoom_out": "Pan zoom out",
+        "rit_toggle": "RIT toggle",
+        "split_toggle": "Split toggle",
+        "tune": "TUNE",
+        "tune_step": "Rate",
+        "tx_rx_toggle": "TX/RX toggle"
+    },
+    "_knobActions": {
+        "active_vfo_frequency": "Active VFO frequency",
+        "attenuator_level": "Attenuator level",
+        "cw_speed": "CW speed",
+        "disabled": "Disabled",
+        "filter_bandwidth": "Filter bandwidth",
+        "filter_shift": "Filter shift",
+        "main_rf_gain": "Main RF gain",
+        "main_squelch": "Main squelch",
+        "main_volume": "Main volume",
+        "manual_notch_pitch": "Manual notch pitch",
+        "noise_blanker_level": "Noise blanker level",
+        "nr_level": "Noise reduction level",
+        "other_vfo_frequency": "Other VFO frequency",
+        "pan_reference_level": "Panadapter reference",
+        "pan_zoom": "Panadapter zoom",
+        "rf_power": "RF power",
+        "rit_xit_frequency": "RIT/XIT frequency",
+        "selected_adjustment": "Selected adjustment (button)",
+        "sub_rf_gain": "Sub RF gain",
+        "sub_squelch": "Sub squelch",
+        "sub_volume": "Sub volume",
+        "waterfall_brightness": "Waterfall brightness"
+    },
+    "_knobOutputs": {
+        "button": "Directional NoteOn pair from a CTR2 MIDI Button output, not a CC value. The cc field selects the pair: CC100 is notes 40/41 through CC107 at notes 54/55; the even note is negative and the odd note is positive.",
+        "sliderA": "Absolute CC values 0 through 127 from a CTR2 Slider A output. The first report establishes position; later movement produces fine signed steps, including across 0/127 wrap. Map 1 uses this for CC101 through CC107.",
+        "sliderB": "Absolute CC values 0 through 127 from a CTR2 Slider B output. It is decoded like sliderA; use it when that CTR2 knob mode is configured as Slider B.",
+        "wheelA": "Relative CC centered on 64: values above 64 are positive, values below 64 are negative, and the distance from 64 preserves acceleration. Use when that CTR2 knob mode is configured as Wheel A. Map 1 uses this for CC100.",
+        "wheelB": "Relative CC direction: value 1 is a positive step and value 126 is a negative step. Use when that CTR2 knob mode is configured as Wheel B.",
+        "wheelB-r": "Reversed Wheel B direction: value 1 is a negative step and value 126 is a positive step."
+    },
+    "format": "qk4-ctr2-midi-mapping",
+    "version": 1,
+    "defaultsRevision": 2,
+    "name": "CTR2 Rate and KHZ Example",
+    "profile": 3,
+    "keyingMode": 0,
+    "straightKeyInput": 0,
+    "extendedButtons": false,
+    "tipRingSwapped": false,
+    "cwInputEnabled": true,
+    "knobs": [
+        {
+            "cc": 100,
+            "action": "active_vfo_frequency",
+            "output": "wheelA"
+        },
+        {
+            "cc": 101,
+            "action": "main_volume",
+            "output": "sliderA"
+        },
+        {
+            "cc": 102,
+            "action": "other_vfo_frequency",
+            "output": "sliderA"
+        },
+        {
+            "cc": 103,
+            "action": "filter_bandwidth",
+            "output": "sliderA"
+        },
+        {
+            "cc": 104,
+            "action": "rit_xit_frequency",
+            "output": "sliderA"
+        },
+        {
+            "cc": 105,
+            "action": "nr_level",
+            "output": "sliderA"
+        },
+        {
+            "cc": 106,
+            "action": "rf_power",
+            "output": "sliderA"
+        },
+        {
+            "cc": 107,
+            "action": "cw_speed",
+            "output": "sliderA"
+        }
+    ],
+    "buttons": [
+        {
+            "note": 1,
+            "action": "mode_next"
+        },
+        {
+            "note": 2,
+            "action": "band_up"
+        },
+        {
+            "note": 3,
+            "action": "main_mute"
+        },
+        {
+            "note": 4,
+            "action": "rit_toggle"
+        },
+        {
+            "note": 5,
+            "action": "pan_zoom_in"
+        },
+        {
+            "note": 6,
+            "action": "tune_step"
+        },
+        {
+            "note": 11,
+            "action": "mode_previous"
+        },
+        {
+            "note": 12,
+            "action": "band_down"
+        },
+        {
+            "note": 13,
+            "action": "nr_toggle"
+        },
+        {
+            "note": 14,
+            "action": "split_toggle"
+        },
+        {
+            "note": 15,
+            "action": "pan_zoom_out"
+        },
+        {
+            "note": 16,
+            "action": "khz"
+        }
+    ],
+    "macros": []
+}

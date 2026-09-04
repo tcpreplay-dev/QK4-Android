@@ -29,8 +29,27 @@ class SideControlPanel : public QWidget {
     Q_OBJECT
 
 public:
+    enum class Adjustment {
+        MainVolume,
+        SubVolume,
+        CwSpeed,
+        RfPower,
+        FilterBandwidth,
+        FilterShift,
+        MainRfGain,
+        MainSquelch,
+        SubSquelch,
+        SubRfGain
+    };
+
     explicit SideControlPanel(QWidget *parent = nullptr);
     ~SideControlPanel() = default;
+
+    // Select the visible control corresponding to an external physical knob.
+    // This changes presentation only and never emits a radio command.
+    void selectAdjustment(Adjustment adjustment);
+    QWidget *adjustmentWidget(Adjustment adjustment) const;
+    bool isCwDisplayMode() const { return m_isCWMode; }
 
     // Mode-dependent display (CW mode shows WPM/PTCH, Voice mode shows MIC/CMP)
     void setDisplayMode(bool isCWMode);
@@ -69,6 +88,8 @@ public:
     // Volume control
     int volume() const;
     int subVolume() const;
+    void setVolume(int value);
+    void setSubVolume(int value);
     void setPhoneMicGain(int value);
 
     // Cancel an alternate-action hold when a containing phone panel begins scrolling.

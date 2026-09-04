@@ -47,6 +47,7 @@ signals:
     // Paddle state changes (debounced)
     void ditStateChanged(bool pressed);
     void dahStateChanged(bool pressed);
+    void straightKeyStateChanged(bool pressed);
     void pttStateChanged(bool pressed);
     void rawMidiEvent(int status, int data1, int data2, bool pressed);
 
@@ -54,6 +55,7 @@ private:
     void onRawDit(bool pressed);
     void onRawDah(bool pressed);
     void onRawPtt(bool pressed);
+    void emitMappedPaddle(bool physicalLeft, bool pressed);
 
     QThread *m_workerThread = nullptr;
     HaliKeyWorkerBase *m_worker = nullptr;

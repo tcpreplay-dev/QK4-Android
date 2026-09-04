@@ -28,10 +28,12 @@ __pycache__/
 /build/
 /build-host/
 /build-tests/
+/build-tests-*/
 /build-android-arm64/
 /build-android-arm64-release/
 /build-android-*/
 *.apk
+*.idsig
 *.aab
 *.o
 *.d

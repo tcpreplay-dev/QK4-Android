@@ -51,6 +51,8 @@ class FeatureMenuBar;
 class ModePopupWidget;
 class KpodDevice;
 class HalikeyDevice;
+class Ctr2MidiDevice;
+class MidiInputRouter;
 class IambicKeyer;
 class TxMeterWidget;
 class KPA1500Client;
@@ -164,6 +166,9 @@ private slots:
     // Fn popup / macro slots
     void onFnFunctionTriggered(const QString &functionId);
     void executeMacro(const QString &functionId);
+    void executeMidiMacro(const QString &command);
+    void handleMidiKnobAction(const QString &action, int value, bool absolute);
+    void handleMidiButtonAction(const QString &action);
     void openMacroDialog();
 
     // MAIN RX / SUB RX popup slots
@@ -182,7 +187,10 @@ private:
     void setupSpectrumPlaceholder(QWidget *parent);
     void showFrequencyEntry(bool vfoB);
     void showPhoneControls();
+    void showPhoneControlAdjustment(const QString &action);
+    void showMidiAdjustmentSurface(const QString &action);
     void showRitXitAdjustment(bool preferXit);
+    void showFeatureAdjustment(int feature);
     void updateConnectionState(TcpClient::ConnectionState state);
     QString formatFrequency(quint64 freq);
     void updateModeLabels();
@@ -391,6 +399,25 @@ private:
 
     // HaliKey CW paddle device
     HalikeyDevice *m_halikeyDevice;
+    // Independent CTR2-MIDI role. It does not replace or reconfigure the
+    // established CW Keyer device/session.
+    Ctr2MidiDevice *m_ctr2MidiDevice = nullptr;
+    MidiInputRouter *m_midiInputRouter = nullptr;
+    int m_midiMainVolumeBeforeMute = -1;
+    int m_midiWaterfallColorRange = 10;
+    QString m_midiSelectedKnobAction = QStringLiteral("active_vfo_frequency");
+    // Accumulate a physical pan-zoom turn locally and send one final SPN
+    // command after the brief burst. This mirrors a discrete on-screen span
+    // change and prevents delayed SPN echoes from becoming the next knob
+    // event's starting point.
+    int m_midiPanZoomPendingSpanA = 0;
+    int m_midiPanZoomPendingSpanB = 0;
+    int m_midiPanZoomGenerationA = 0;
+    int m_midiPanZoomGenerationB = 0;
+    quint64 m_midiPanZoomAnchorFrequencyA = 0;
+    quint64 m_midiPanZoomAnchorFrequencyB = 0;
+    int m_midiPanZoomAnchorStepAHz = 1000;
+    int m_midiPanZoomAnchorStepBHz = 1000;
     IambicKeyer *m_iambicKeyer = nullptr;
     QThread *m_keyerThread = nullptr;
 
