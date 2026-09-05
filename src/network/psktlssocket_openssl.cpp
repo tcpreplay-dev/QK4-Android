@@ -18,12 +18,21 @@ namespace {
 QString drainOpenSslErrors() {
     QString text;
     unsigned long code;
-    while ((code = ERR_get_error()) != 0) {
+    const char *file = nullptr;
+    const char *func = nullptr;
+    const char *data = nullptr;
+    int line = 0;
+    int flags = 0;
+    while ((code = ERR_get_error_all(&file, &line, &func, &data, &flags)) != 0) {
         char buf[256];
         ERR_error_string_n(code, buf, sizeof buf);
         if (!text.isEmpty())
             text += QLatin1String("; ");
         text += QString::fromLatin1(buf);
+        if (file)
+            text += QStringLiteral(" [%1:%2 %3]").arg(QString::fromLatin1(file)).arg(line).arg(QString::fromLatin1(func ? func : ""));
+        if (data && (flags & ERR_TXT_STRING) && *data)
+            text += QStringLiteral(" (%1)").arg(QString::fromLatin1(data));
     }
     return text;
 }
@@ -70,10 +79,13 @@ void PskTlsSocket::connectToHostEncrypted(const QString &host, quint16 port) {
         failTls(QStringLiteral("SSL_CTX_new"));
         return;
     }
+    // The K4 speaks TLS 1.2 with PSK cipher suites. Pin exactly that: with
+    // TLS 1.3 enabled, OpenSSL 3 fails inside tls_construct_ctos_early_data
+    // ("internal error") when the key comes from the legacy
+    // psk_client_callback, so the ClientHello never leaves the device.
     SSL_CTX_set_min_proto_version(m_ctx, TLS1_2_VERSION);
+    SSL_CTX_set_max_proto_version(m_ctx, TLS1_2_VERSION);
     SSL_CTX_set_verify(m_ctx, SSL_VERIFY_NONE, nullptr); // PSK: no certificates
-    // TLS 1.2: offer only PSK key exchange. TLS 1.3 keeps its own suites and
-    // takes the key from the same callback, matching Qt's OpenSSL backend.
     if (SSL_CTX_set_cipher_list(m_ctx, "PSK") != 1) {
         failTls(QStringLiteral("no PSK cipher suites available"));
         return;
@@ -176,12 +188,13 @@ qint64 PskTlsSocket::writeData(const char *data, qint64 size) {
 }
 
 void PskTlsSocket::onTcpConnected() {
-    emit connected();
-    if (!m_useTls) {
+    // Plain connections are writable from inside the connected() slot
+    // (TcpClient sends the auth hash there), so open before emitting.
+    if (!m_useTls)
         open(QIODevice::ReadWrite | QIODevice::Unbuffered);
-        return;
-    }
-    pumpTls(); // sends ClientHello
+    emit connected();
+    if (m_useTls)
+        pumpTls(); // sends ClientHello
 }
 
 void PskTlsSocket::onTcpReadyRead() {
@@ -224,9 +237,12 @@ bool PskTlsSocket::pumpTls() {
 
     if (!m_handshakeDone) {
         const int r = SSL_do_handshake(m_ssl);
+        const size_t pendingOut = BIO_ctrl_pending(m_writeBio);
         flushOutgoing();
         if (r != 1) {
             const int err = SSL_get_error(m_ssl, r);
+            qDebug() << "TLS handshake step: rc" << r << "ssl_error" << err << "wrote" << pendingOut
+                     << "bytes, state" << SSL_state_string_long(m_ssl);
             if (err == SSL_ERROR_WANT_READ || err == SSL_ERROR_WANT_WRITE)
                 return true; // need more bytes from the radio
             failTls(QStringLiteral("handshake"));
