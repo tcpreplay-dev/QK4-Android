@@ -3,7 +3,9 @@
 
 #include <QList>
 #include <QObject>
+#ifndef Q_OS_IOS
 #include <QSerialPortInfo>
+#endif
 #include <QString>
 #include <QThread>
 #include <QTimer>

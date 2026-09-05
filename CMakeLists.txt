@@ -67,7 +67,24 @@ if(ANDROID)
 endif()
 
 # Core Qt components (GuiPrivate handled separately for cross-platform compatibility)
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets Network Multimedia ShaderTools Gui SerialPort Svg)
+# QtSerialPort is not available on iOS; the HaliKey serial path is stubbed there.
+set(QK4_QT_COMPONENTS Core Widgets Network Multimedia ShaderTools Gui Svg)
+if(NOT IOS)
+    list(APPEND QK4_QT_COMPONENTS SerialPort)
+endif()
+find_package(Qt6 REQUIRED COMPONENTS ${QK4_QT_COMPONENTS})
+
+# TLS-PSK backend for the K4 link. Qt's iOS kit ships only the Secure
+# Transport TLS plugin, which has no PSK support, so iOS drives a statically
+# linked OpenSSL directly (see src/network/psktlssocket_openssl.cpp).
+if(IOS)
+    set(_qk4_psk_openssl_default ON)
+else()
+    set(_qk4_psk_openssl_default OFF)
+endif()
+option(QK4_PSK_TLS_OPENSSL "Use OpenSSL directly for TLS-PSK instead of QSslSocket" ${_qk4_psk_openssl_default})
+unset(_qk4_psk_openssl_default)
+set(QK4_OPENSSL_ROOT "" CACHE PATH "OpenSSL install prefix (include/, lib/) used when QK4_PSK_TLS_OPENSSL is ON")
 
 # GuiPrivate is needed for QRhi access but may not have CMake config on all platforms
 if(APPLE)
@@ -128,6 +145,26 @@ if(ANDROID)
             "Android build requires Opus. Provide -DQK4_OPUS_INCLUDE_DIR and -DQK4_OPUS_LIBRARY, "
             "or install an Opus package that exports Opus::opus.")
     endif()
+elseif(IOS)
+    # iOS: HID/serial/MIDI hardware is stubbed. Opus and OpenSSL are static
+    # fat libraries (x86_64 simulator + arm64 device) under third_party/ios;
+    # see third_party/ios/README.md for how they are built.
+    set(HIDAPI_INCLUDE_DIRS "")
+    set(HIDAPI_LIBRARIES "")
+    if(NOT QK4_OPUS_INCLUDE_DIR OR NOT QK4_OPUS_LIBRARY)
+        set(QK4_OPUS_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ios/opus/include")
+        set(QK4_OPUS_LIBRARY "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ios/opus/lib/libopus.a")
+    endif()
+    if(NOT EXISTS "${QK4_OPUS_INCLUDE_DIR}/opus/opus.h" OR NOT EXISTS "${QK4_OPUS_LIBRARY}")
+        message(FATAL_ERROR
+            "iOS build requires a static Opus. Expected ${QK4_OPUS_INCLUDE_DIR}/opus/opus.h and "
+            "${QK4_OPUS_LIBRARY}; see third_party/ios/README.md.")
+    endif()
+    set(OPUS_INCLUDE_DIRS "${QK4_OPUS_INCLUDE_DIR}")
+    set(OPUS_LIBRARIES "${QK4_OPUS_LIBRARY}")
+    if(NOT QK4_OPENSSL_ROOT)
+        set(QK4_OPENSSL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/third_party/ios/openssl")
+    endif()
 elseif(APPLE)
     # macOS with Homebrew
     set(OPUS_PREFIX "/opt/homebrew/opt/opus")
@@ -155,6 +192,7 @@ set(SOURCES
     src/main.cpp
     src/mainwindow.cpp
     src/network/tcpclient.cpp
+    src/network/psktlssocket.h
     src/network/protocol.cpp
     src/network/kpa1500client.cpp
     src/network/catserver.cpp
@@ -229,8 +267,14 @@ set(SOURCES
     src/ui/wheelaccumulator.cpp
 )
 
-if(ANDROID)
-    # Keep class availability on Android via no-op implementations.
+if(QK4_PSK_TLS_OPENSSL)
+    list(APPEND SOURCES src/network/psktlssocket_openssl.cpp)
+else()
+    list(APPEND SOURCES src/network/psktlssocket_qssl.cpp)
+endif()
+
+if(ANDROID OR IOS)
+    # Keep class availability on Android/iOS via no-op implementations.
     list(APPEND SOURCES
         src/hardware/kpoddevice.cpp
         src/hardware/halikeydevice.cpp
@@ -324,7 +368,7 @@ set(HEADERS
     src/ui/wheelaccumulator.h
 )
 
-if(ANDROID)
+if(ANDROID OR IOS)
     list(APPEND HEADERS
         src/hardware/kpoddevice.h
         src/hardware/halikeydevice.h
@@ -342,6 +386,25 @@ endif()
 # On Android, create Qt executable package target
 if(ANDROID)
     qt_add_executable(${PROJECT_NAME} MANUAL_FINALIZATION ${SOURCES} ${HEADERS})
+elseif(IOS)
+    # Qt for iOS is static and needs qt_add_executable for plugin import.
+    # Build with the Xcode generator (qt-cmake defaults to it) and pick the
+    # SDK at build time: cmake --build . -- -sdk iphonesimulator
+    set(MACOSX_BUNDLE_BUNDLE_NAME ${PROJECT_NAME})
+    set(MACOSX_BUNDLE_BUNDLE_VERSION ${QK4_VERSION_FULL})
+    set(MACOSX_BUNDLE_SHORT_VERSION_STRING ${QK4_VERSION_FULL})
+    set(MACOSX_BUNDLE_GUI_IDENTIFIER "dev.tcpreplay.qk4")
+    qt_add_executable(${PROJECT_NAME} MANUAL_FINALIZATION MACOSX_BUNDLE ${SOURCES} ${HEADERS})
+    set_target_properties(${PROJECT_NAME} PROPERTIES
+        MACOSX_BUNDLE_INFO_PLIST "${CMAKE_SOURCE_DIR}/resources/Info.plist.ios.in"
+        XCODE_ATTRIBUTE_PRODUCT_BUNDLE_IDENTIFIER "dev.tcpreplay.qk4"
+        XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
+        XCODE_ATTRIBUTE_INFOPLIST_KEY_UIRequiresFullScreen YES
+    )
+    # Static Qt auto-imports every Multimedia plugin. QK4 only uses
+    # QAudioSink/QAudioSource/QMediaDevices, which live in QtMultimedia itself,
+    # so drop the FFmpeg plugin and its five xcframeworks.
+    qt_import_plugins(${PROJECT_NAME} EXCLUDE Qt6::QFFmpegMediaPlugin)
 # On macOS, create an app bundle
 elseif(APPLE)
     set(MACOSX_BUNDLE_BUNDLE_NAME ${PROJECT_NAME})
@@ -411,10 +474,30 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Multimedia
     Qt6::Gui
     Qt6::Svg
-    Qt6::SerialPort
     ${OPUS_LIBRARIES}
     ${HIDAPI_LIBRARIES}
 )
+if(NOT IOS)
+    target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::SerialPort)
+endif()
+
+if(QK4_PSK_TLS_OPENSSL)
+    if(NOT QK4_OPENSSL_ROOT)
+        message(FATAL_ERROR "QK4_PSK_TLS_OPENSSL requires QK4_OPENSSL_ROOT (prefix with include/ and lib/).")
+    endif()
+    foreach(_qk4_ssl_file "include/openssl/ssl.h" "lib/libssl.a" "lib/libcrypto.a")
+        if(NOT EXISTS "${QK4_OPENSSL_ROOT}/${_qk4_ssl_file}")
+            message(FATAL_ERROR "Missing ${QK4_OPENSSL_ROOT}/${_qk4_ssl_file}; see third_party/ios/README.md.")
+        endif()
+    endforeach()
+    unset(_qk4_ssl_file)
+    target_compile_definitions(${PROJECT_NAME} PRIVATE QK4_PSK_TLS_OPENSSL)
+    target_include_directories(${PROJECT_NAME} PRIVATE "${QK4_OPENSSL_ROOT}/include")
+    target_link_libraries(${PROJECT_NAME} PRIVATE
+        "${QK4_OPENSSL_ROOT}/lib/libssl.a"
+        "${QK4_OPENSSL_ROOT}/lib/libcrypto.a"
+    )
+endif()
 
 # Link GuiPrivate if found via CMake, otherwise private headers are included manually
 if(QT_GUI_PRIVATE_FOUND)
@@ -422,7 +505,7 @@ if(QT_GUI_PRIVATE_FOUND)
 endif()
 
 # macOS frameworks for KPOD hotplug detection (IOKit)
-if(APPLE)
+if(APPLE AND NOT IOS)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         "-framework IOKit"
         "-framework CoreFoundation"
@@ -430,7 +513,9 @@ if(APPLE)
 endif()
 
 # RtMidi platform-specific MIDI backend
-if(APPLE)
+if(ANDROID OR IOS)
+    # No RtMidi backend yet (HaliKey/KPOD features disabled).
+elseif(APPLE)
     target_compile_definitions(${PROJECT_NAME} PRIVATE __MACOSX_CORE__)
     target_link_libraries(${PROJECT_NAME} PRIVATE
         "-framework CoreMIDI"
@@ -439,8 +524,6 @@ if(APPLE)
 elseif(WIN32)
     target_compile_definitions(${PROJECT_NAME} PRIVATE __WINDOWS_MM__)
     target_link_libraries(${PROJECT_NAME} PRIVATE winmm)
-elseif(ANDROID)
-    # No RtMidi backend on Android (HaliKey/KPOD features disabled).
 else()
     target_compile_definitions(${PROJECT_NAME} PRIVATE __LINUX_ALSA__)
     target_link_libraries(${PROJECT_NAME} PRIVATE asound)
@@ -523,7 +606,7 @@ endif()
 # Deployment / Bundling - Create self-contained distributable app
 # =============================================================================
 
-if(APPLE)
+if(APPLE AND NOT IOS)
     # Find macdeployqt
     find_program(MACDEPLOYQT_EXECUTABLE macdeployqt HINTS "${Qt6_DIR}/../../../bin")
 
@@ -613,11 +696,11 @@ elseif(WIN32)
     )
 endif()
 
-if(ANDROID)
+if(ANDROID OR IOS)
     qt_finalize_executable(${PROJECT_NAME})
 endif()
 
-if(BUILD_TESTING AND NOT ANDROID)
+if(BUILD_TESTING AND NOT ANDROID AND NOT IOS)
     find_package(Qt6 REQUIRED COMPONENTS Test)
     qt_add_executable(test_frequencyentryparser
         tests/test_frequencyentryparser.cpp
