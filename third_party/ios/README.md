@@ -53,3 +53,30 @@ merges the two with `__x86_64__` / `__aarch64__` guards where they differ.
 
 See `opus/README.md` once populated. Same recipe: configure Opus with CMake
 for `iphonesimulator` and `iphoneos`, `BUILD_SHARED_LIBS=OFF`, then `lipo`.
+
+## Debug builds crash in the panadapter — use RelWithDebInfo
+
+A `Debug` iOS build aborts on the first frame with a Qt Metal assertion:
+
+```
+ASSERT: "...->recordingPass == QMetalCommandBuffer::NoPass" in qrhimetal.mm
+```
+
+`PanadapterRhiWidget::render()` and `MiniPanRhiWidget::render()` call
+`QRhiCommandBuffer::resourceUpdate()` between `beginPass()` and `endPass()`.
+Qt only allows that outside a pass; its Metal backend enforces it with a
+`Q_ASSERT`, so the check fires only in debug Qt. This predates the iOS work
+(inherited from upstream QK4) and affects every platform — it is simply
+compiled out of non-debug builds, which is why desktop Release and Android
+never trip it.
+
+Until the renderers are restructured to upload all resources before the
+pass, build the iOS app with `RelWithDebInfo`. Qt's assertions are off, so
+it runs, and it keeps debug symbols for breakpoints and stepping:
+
+```bash
+cmake --build build-ios --config RelWithDebInfo \
+    -- -sdk iphonesimulator -arch x86_64 CODE_SIGNING_ALLOWED=NO ONLY_ACTIVE_ARCH=YES
+```
+
+Plain `Release` also runs; it just has no debug symbols.
