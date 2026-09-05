@@ -273,6 +273,14 @@ else()
     list(APPEND SOURCES src/network/psktlssocket_qssl.cpp)
 endif()
 
+if(IOS)
+    # iOS-only AVAudioSession backend (Objective-C++). Needed so the mic can be
+    # captured for TX; RX works without it. Built with ARC.
+    list(APPEND SOURCES src/ios/iosaudiosession.mm)
+    list(APPEND HEADERS src/ios/iosaudiosession.h)
+    set_source_files_properties(src/ios/iosaudiosession.mm PROPERTIES COMPILE_FLAGS "-fobjc-arc")
+endif()
+
 if(ANDROID OR IOS)
     # Keep class availability on Android/iOS via no-op implementations.
     list(APPEND SOURCES
@@ -401,6 +409,8 @@ elseif(IOS)
         XCODE_ATTRIBUTE_TARGETED_DEVICE_FAMILY "1,2"
         XCODE_ATTRIBUTE_INFOPLIST_KEY_UIRequiresFullScreen YES
     )
+    # AVAudioSession (src/ios/iosaudiosession.mm) lives in AVFoundation.
+    target_link_libraries(${PROJECT_NAME} PRIVATE "-framework AVFoundation" "-framework Foundation")
     # Static Qt auto-imports every Multimedia plugin. QK4 only uses
     # QAudioSink/QAudioSource/QMediaDevices, which live in QtMultimedia itself,
     # so drop the FFmpeg plugin and its five xcframeworks.
