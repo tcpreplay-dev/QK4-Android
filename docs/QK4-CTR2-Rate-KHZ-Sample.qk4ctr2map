@@ -4,8 +4,17 @@
         "For a predefined button function, copy a keyword from _buttonActions into the button's action field and remove its macro field.",
         "For a custom K4 programmer command, use action \"macro\", set the button's macro field to an id, and define that id in macros. Commands must end with a semicolon.",
         "The adjust_* button actions select the function controlled by a knob whose action is selected_adjustment.",
+        "Set buttonMode to \"normal\" or \"extended\" to match the Extended BTN setting in CTR2-MIDI. QK4 cannot detect that device setting automatically.",
+        "Each buttons entry identifies its physical button, MIDI note, press type, knob mode, and mapped action or macro. buttonLabel, pressType, and knobMode are explanatory fields; QK4 derives the control from note when loading.",
         "A knob's output describes the MIDI messages emitted by that CTR2 knob mode; it does not select the radio action. The output keyword must match the output configured on the CTR2. See _knobOutputs.",
         "Loading replaces the complete CTR2 mapping; mappings are never merged."
+    ],
+    "_buttonModeGuide": [
+        "normal: the same 12 functions are used in every knob mode. Short presses are MIDI notes 1-6; long presses are notes 11-16.",
+        "extended: each device knob mode has its own 12 functions. Home uses short notes 1-6 and long notes 25-30; Knob mode 1 uses 7-12 and 31-36; Knob mode 2 uses 13-18 and 37-42; Knob mode 3 uses 19-24 and 43-48.",
+        "When extended mode is first enabled in QK4, the 12 normal assignments become the Home assignments. The 36 newly exposed Knob mode 1-3 assignments start disabled; they are not copies of Home.",
+        "When a knob control uses MIDI Button output, normal mode uses directional notes 40-55. Extended mode relocates CC100-107 to notes 60-75 within the manufacturer-defined 60-95 range so notes 40-48 remain available to physical buttons.",
+        "Every listed button can use a predefined action keyword or action \"macro\" with a supported K4 Programmer's Reference command."
     ],
     "_knobOutputGuide": [
         "Stock K4-Control Map 1: leave CC100 set to wheelA and CC101 through CC107 set to sliderA. No output selection is required unless you reprogram those modes in CTR2-MIDI.",
@@ -80,7 +89,7 @@
         "waterfall_brightness": "Waterfall brightness"
     },
     "_knobOutputs": {
-        "button": "Directional NoteOn pair from a CTR2 MIDI Button output, not a CC value. The cc field selects the pair: CC100 is notes 40/41 through CC107 at notes 54/55; the even note is negative and the odd note is positive.",
+        "button": "Directional NoteOn pair from a CTR2 MIDI Button output, not a CC value. In normal mode CC100 uses notes 40/41 through CC107 at 54/55. Extended Button Mode relocates those eight pairs to 60/61 through 74/75 within the manufacturer-defined 60-95 knob Button range. The first note is counter-clockwise and the second is clockwise.",
         "sliderA": "Absolute CC values 0 through 127 from a CTR2 Slider A output. The first report establishes position; later movement produces fine signed steps, including across 0/127 wrap. Map 1 uses this for CC101 through CC107.",
         "sliderB": "Absolute CC values 0 through 127 from a CTR2 Slider B output. It is decoded like sliderA; use it when that CTR2 knob mode is configured as Slider B.",
         "wheelA": "Relative CC centered on 64: values above 64 are positive, values below 64 are negative, and the distance from 64 preserves acceleration. Use when that CTR2 knob mode is configured as Wheel A. Map 1 uses this for CC100.",
@@ -88,52 +97,108 @@
         "wheelB-r": "Reversed Wheel B direction: value 1 is a negative step and value 126 is a positive step."
     },
     "format": "qk4-ctr2-midi-mapping",
-    "version": 1,
-    "defaultsRevision": 2,
+    "version": 2,
+    "defaultsRevision": 3,
     "name": "CTR2 Rate and KHZ Example",
     "profile": 3,
     "keyingMode": 0,
     "straightKeyInput": 0,
-    "extendedButtons": false,
+    "buttonMode": "normal",
     "tipRingSwapped": false,
     "cwInputEnabled": true,
     "knobs": [
         {
+            "controlLabel": "Home turn",
+            "knobMode": "Home",
+            "gesture": "turn",
+            "buttonOutputNotes": {
+                "normal": { "counterClockwise": 40, "clockwise": 41 },
+                "extended": { "counterClockwise": 60, "clockwise": 61 }
+            },
             "cc": 100,
             "action": "active_vfo_frequency",
             "output": "wheelA"
         },
         {
+            "controlLabel": "Home push and turn",
+            "knobMode": "Home",
+            "gesture": "push and turn",
+            "buttonOutputNotes": {
+                "normal": { "counterClockwise": 42, "clockwise": 43 },
+                "extended": { "counterClockwise": 62, "clockwise": 63 }
+            },
             "cc": 101,
             "action": "main_volume",
             "output": "sliderA"
         },
         {
+            "controlLabel": "Knob mode 1 turn",
+            "knobMode": "Knob mode 1",
+            "gesture": "turn",
+            "buttonOutputNotes": {
+                "normal": { "counterClockwise": 44, "clockwise": 45 },
+                "extended": { "counterClockwise": 64, "clockwise": 65 }
+            },
             "cc": 102,
             "action": "other_vfo_frequency",
             "output": "sliderA"
         },
         {
+            "controlLabel": "Knob mode 1 push and turn",
+            "knobMode": "Knob mode 1",
+            "gesture": "push and turn",
+            "buttonOutputNotes": {
+                "normal": { "counterClockwise": 46, "clockwise": 47 },
+                "extended": { "counterClockwise": 66, "clockwise": 67 }
+            },
             "cc": 103,
             "action": "filter_bandwidth",
             "output": "sliderA"
         },
         {
+            "controlLabel": "Knob mode 2 turn",
+            "knobMode": "Knob mode 2",
+            "gesture": "turn",
+            "buttonOutputNotes": {
+                "normal": { "counterClockwise": 48, "clockwise": 49 },
+                "extended": { "counterClockwise": 68, "clockwise": 69 }
+            },
             "cc": 104,
             "action": "rit_xit_frequency",
             "output": "sliderA"
         },
         {
+            "controlLabel": "Knob mode 2 push and turn",
+            "knobMode": "Knob mode 2",
+            "gesture": "push and turn",
+            "buttonOutputNotes": {
+                "normal": { "counterClockwise": 50, "clockwise": 51 },
+                "extended": { "counterClockwise": 70, "clockwise": 71 }
+            },
             "cc": 105,
             "action": "nr_level",
             "output": "sliderA"
         },
         {
+            "controlLabel": "Knob mode 3 turn",
+            "knobMode": "Knob mode 3",
+            "gesture": "turn",
+            "buttonOutputNotes": {
+                "normal": { "counterClockwise": 52, "clockwise": 53 },
+                "extended": { "counterClockwise": 72, "clockwise": 73 }
+            },
             "cc": 106,
             "action": "rf_power",
             "output": "sliderA"
         },
         {
+            "controlLabel": "Knob mode 3 push and turn",
+            "knobMode": "Knob mode 3",
+            "gesture": "push and turn",
+            "buttonOutputNotes": {
+                "normal": { "counterClockwise": 54, "clockwise": 55 },
+                "extended": { "counterClockwise": 74, "clockwise": 75 }
+            },
             "cc": 107,
             "action": "cw_speed",
             "output": "sliderA"
@@ -141,51 +206,87 @@
     ],
     "buttons": [
         {
+            "buttonLabel": "Button 1",
+            "knobMode": "All knob modes",
             "note": 1,
+            "pressType": "short",
             "action": "mode_next"
         },
         {
+            "buttonLabel": "Button 2",
+            "knobMode": "All knob modes",
             "note": 2,
+            "pressType": "short",
             "action": "band_up"
         },
         {
+            "buttonLabel": "Button 3",
+            "knobMode": "All knob modes",
             "note": 3,
+            "pressType": "short",
             "action": "main_mute"
         },
         {
+            "buttonLabel": "Button 4",
+            "knobMode": "All knob modes",
             "note": 4,
+            "pressType": "short",
             "action": "rit_toggle"
         },
         {
+            "buttonLabel": "Button 5",
+            "knobMode": "All knob modes",
             "note": 5,
+            "pressType": "short",
             "action": "pan_zoom_in"
         },
         {
+            "buttonLabel": "Button 6",
+            "knobMode": "All knob modes",
             "note": 6,
+            "pressType": "short",
             "action": "tune_step"
         },
         {
+            "buttonLabel": "Button 1",
+            "knobMode": "All knob modes",
             "note": 11,
+            "pressType": "long",
             "action": "mode_previous"
         },
         {
+            "buttonLabel": "Button 2",
+            "knobMode": "All knob modes",
             "note": 12,
+            "pressType": "long",
             "action": "band_down"
         },
         {
+            "buttonLabel": "Button 3",
+            "knobMode": "All knob modes",
             "note": 13,
+            "pressType": "long",
             "action": "nr_toggle"
         },
         {
+            "buttonLabel": "Button 4",
+            "knobMode": "All knob modes",
             "note": 14,
+            "pressType": "long",
             "action": "split_toggle"
         },
         {
+            "buttonLabel": "Button 5",
+            "knobMode": "All knob modes",
             "note": 15,
+            "pressType": "long",
             "action": "pan_zoom_out"
         },
         {
+            "buttonLabel": "Button 6",
+            "knobMode": "All knob modes",
             "note": 16,
+            "pressType": "long",
             "action": "khz"
         }
     ],

@@ -3,7 +3,7 @@
 QK4 Android is a phone-focused Android client for Elecraft K4 transceivers. It preserves the proven radio-control, TCP/TLS, panadapter-stream, and TX/RX audio architecture of QK4 while replacing its desktop-oriented interaction model with a landscape touch interface.
 
 The application is under active development and is intended for use with an
-Elecraft K4/K4D on the same network. Version 1.0.4 is the current ARM64
+Elecraft K4/K4D on the same network. Version 1.0.4.1 is the current ARM64
 release.
 
 ![QK4 Mobile v0.8.0 console](./docs/images/QK4-Mobile-v0.8.0-Console.png)
@@ -106,6 +106,16 @@ predefined function such as Band up/down, Rate, KHZ, TX/RX toggle, or an
 command or command sequence exactly as entered; QK4 does not invent or merge a
 separate macro language.
 
+In Normal Button Mode, the same 12 short/long assignments work in every knob
+mode. Enabling Extended Button Mode retains those assignments under **Home**
+and exposes 36 additional assignments for Knob modes 1–3, initially set to
+**Disabled**. QK4 does not duplicate the Home actions into the new modes. The
+checkbox must match the CTR2's own Extended BTN setting.
+
+For a knob configured to emit directional MIDI Button notes, QK4 uses notes
+40–55 in Normal Button Mode and notes 60–75 in Extended Button Mode. This keeps
+extended physical-button notes 40–48 available for their documented actions.
+
 ![QK4 Mobile CTR2 short/long button mappings](./docs/images/QK4-Mobile-v1.0.4-CTR2-Button-Mapping.png)
 
 Complete CTR2 configurations can be saved to and loaded from user-accessible
@@ -113,7 +123,9 @@ Complete CTR2 configurations can be saved to and loaded from user-accessible
 it. QK4 prompts to apply or abandon pending edits before leaving the setup
 screen, and prompts about saving only when a load would replace unsaved
 changes. Exported files document the accepted action and output keywords,
-including when to use Wheel or Slider formats. See the
+including when to use Wheel, Slider, or directional Button formats. Every
+button entry identifies its physical label, MIDI note, press type, knob mode,
+and assigned action or macro. See the
 [sample CTR2 mapping](docs/QK4-CTR2-Rate-KHZ-Sample.qk4ctr2map).
 
 The separate **Fn Key Setup** page can likewise save or load all F1-F8 labels

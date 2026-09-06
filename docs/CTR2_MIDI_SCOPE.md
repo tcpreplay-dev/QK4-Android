@@ -76,12 +76,20 @@ Support both CTR2 button layouts:
   actions (notes 11-16). CTR2 sends these on button release.
 - Extended BTN mode: all 48 documented button actions, selected by the current
   knob mode.
-- Add a QK4 setup selection: `CTR2 button layout: Normal (12) | Extended (48)`.
+- Place an **Extended Button Mode** checkbox directly below the Buttons
+  description. With it off, show `Button 1 short` through `Button 6 long`.
+  With it on, show mode-qualified controls for the device's documented four
+  states: `Home knob mode`, `Knob mode 1`, `Knob mode 2`, and `Knob mode 3`.
 - Warn that the app selection must match the CTR2's own Extended BTN setting;
   QK4 cannot reliably infer that state from otherwise valid incoming notes.
 - Allow every action to map to an applicable K4 command or an existing local
   QK4 function. Do not replace local implementations such as GEN with a radio
   command.
+- Save the selected layout as `buttonMode: normal` or `buttonMode: extended`.
+  Continue accepting older files that used the `extendedButtons` boolean.
+- When Extended Button Mode is first enabled, retain the 12 Normal-mode
+  assignments under Home and initialize the 36 newly exposed Mode 1-3
+  assignments as Disabled. Do not clone Home actions into every mode.
 - Provide typed `Adjust:` button actions for every predefined continuous knob
   action. A knob assigned to **Selected adjustment (button)** follows the last
   such button selection, matching the radio-like workflow where a control is
@@ -120,9 +128,13 @@ coalesced position counts must not multiply the radio-control step. Device tests
 of CC102-CC106 confirmed that using raw position differences, or treating these
 positions as centered WheelA values, causes large or reversed adjustments.
 
-Support every documented knob-output format:
+Support every documented knob-output format. The knob Button range depends on
+the device's Extended BTN setting; it must never steal notes 40-48 from the
+extended physical buttons:
 
-- Button: directional NoteOn pairs, notes 40-55
+- Button, Normal BTN mode: directional NoteOn pairs, notes 40-55
+- Button, Extended BTN mode: manufacturer-defined range 60-95; the current
+  CC100-107 controls use sequential direction pairs 60/61 through 74/75
 - SliderA: absolute CC values 0-127
 - SliderB: absolute CC values 0-127
 - WheelA: relative values centered on 64, including accelerated magnitude
@@ -167,5 +179,7 @@ value or require meaningful movement before applying a new absolute value.
 - CTR2 straight key and PTT with TIP/RING swapped both ways
 - HaliKey paddle and straight-key/external-keyer modes
 - TinyMIDI paddle and straight-key/external-keyer modes
+- Sustained straight-key sidetone remains smooth under ordinary Android timer
+  jitter while retaining a short attack, fall, and bounded key-up delay
 - K4 CW VOX on/off, QSK, and DLY behavior without connection-side mutation
 - TEST TX first for keying/PTT safety, followed by controlled on-air validation

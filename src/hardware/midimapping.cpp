@@ -10,7 +10,7 @@ namespace {
 // corrected from WheelA to SliderA for CC101-107.  This is separate from the
 // file-format version: it identifies which factory defaults a saved map was
 // based on without invalidating user mapping files.
-constexpr int Ctr2DefaultsRevision = 2;
+constexpr int Ctr2DefaultsRevision = 3;
 
 QString outputName(KnobOutput output) {
     switch (output) {
@@ -51,6 +51,53 @@ KnobBinding knob(const char *id, KnobOutput output) {
     binding.action = QString::fromLatin1(id);
     binding.output = output;
     return binding;
+}
+
+struct Ctr2ButtonDescriptor {
+    QString buttonLabel;
+    QString pressType;
+    QString knobMode;
+};
+
+Ctr2ButtonDescriptor ctr2ButtonDescriptor(bool extendedButtons, int note) {
+    if (!extendedButtons) {
+        if (note >= 1 && note <= 6)
+            return {QStringLiteral("Button %1").arg(note), QStringLiteral("short"),
+                    QStringLiteral("All knob modes")};
+        if (note >= 11 && note <= 16)
+            return {QStringLiteral("Button %1").arg(note - 10), QStringLiteral("long"),
+                    QStringLiteral("All knob modes")};
+        return {};
+    }
+
+    const bool shortPress = note >= 1 && note <= 24;
+    const bool longPress = note >= 25 && note <= 48;
+    if (!shortPress && !longPress)
+        return {};
+    const int index = shortPress ? note - 1 : note - 25;
+    const int mode = index / 6;
+    return {QStringLiteral("Button %1").arg(index % 6 + 1),
+            shortPress ? QStringLiteral("short") : QStringLiteral("long"),
+            mode == 0 ? QStringLiteral("Home") : QStringLiteral("Knob mode %1").arg(mode)};
+}
+
+struct Ctr2KnobDescriptor {
+    QString controlLabel;
+    QString knobMode;
+    QString gesture;
+};
+
+Ctr2KnobDescriptor ctr2KnobDescriptor(int cc) {
+    if (cc < 100 || cc > 107)
+        return {};
+    const int index = cc - 100;
+    const int mode = index / 2;
+    const QString knobMode = mode == 0
+                                 ? QStringLiteral("Home")
+                                 : QStringLiteral("Knob mode %1").arg(mode);
+    const QString gesture = (index % 2) == 0 ? QStringLiteral("turn")
+                                              : QStringLiteral("push and turn");
+    return {QStringLiteral("%1 %2").arg(knobMode, gesture), knobMode, gesture};
 }
 
 } // namespace
@@ -98,28 +145,100 @@ DeviceMapping ctr2Default() {
 }
 
 DeviceMapping ctr2ExtendedDefault() {
-    DeviceMapping mapping = ctr2Default();
+    DeviceMapping mapping = withCtr2ButtonMode(ctr2Default(), true);
     mapping.name = QStringLiteral("K4-Control Extended Default");
-    mapping.extendedButtons = true;
-    mapping.buttons.clear();
+    return mapping;
+}
 
-    const int shortNotes[4][6] = {
-        {1, 2, 3, 4, 5, 6}, {7, 8, 9, 10, 11, 12},
-        {13, 14, 15, 16, 17, 18}, {19, 20, 21, 22, 23, 24}};
-    const int longNotes[4][6] = {
-        {25, 26, 27, 28, 29, 30}, {31, 32, 33, 34, 35, 36},
-        {37, 38, 39, 40, 41, 42}, {43, 44, 45, 46, 47, 48}};
-    const char *shortActions[6] = {"mode_next", "band_up", "main_mute", "rit_toggle",
-                                   "pan_zoom_in", "tune_step"};
-    const char *longActions[6] = {"mode_previous", "band_down", "nr_toggle", "split_toggle",
-                                  "pan_zoom_out", "tune"};
-    for (int mode = 0; mode < 4; ++mode) {
+QVector<int> ctr2ButtonNotes(bool extendedButtons) {
+    QVector<int> notes;
+    if (extendedButtons) {
+        notes.reserve(48);
+        for (int mode = 0; mode < 4; ++mode) {
+            for (int button = 0; button < 6; ++button) {
+                notes.append(mode * 6 + button + 1);  // Short press: MIDI 1-24
+                notes.append(mode * 6 + button + 25); // Long press: MIDI 25-48
+            }
+        }
+        return notes;
+    }
+
+    notes.reserve(12);
+    for (int button = 1; button <= 6; ++button) {
+        notes.append(button);      // Short press: MIDI 1-6
+        notes.append(button + 10); // Long press: MIDI 11-16
+    }
+    return notes;
+}
+
+DeviceMapping withCtr2ButtonMode(const DeviceMapping &mapping, bool extendedButtons) {
+    if (mapping.profile != Profile::Ctr2 || mapping.extendedButtons == extendedButtons)
+        return mapping;
+
+    DeviceMapping converted = mapping;
+    converted.extendedButtons = extendedButtons;
+    converted.buttons.clear();
+    converted.macros.clear();
+
+    const auto copyBinding = [&mapping, &converted, extendedButtons](int targetNote,
+                                                                     int sourceNote) {
+        ButtonBinding binding = mapping.buttons.value(
+            sourceNote, {QStringLiteral("disabled"), QString()});
+        if (binding.action == QStringLiteral("macro")) {
+            const MacroDefinition definition = mapping.macros.value(binding.macroId);
+            binding.macroId = QStringLiteral("button-%1").arg(targetNote);
+            converted.macros.insert(
+                binding.macroId,
+                {ctr2ButtonLabel(extendedButtons, targetNote), definition.command});
+        }
+        converted.buttons.insert(targetNote, binding);
+    };
+
+    if (extendedButtons) {
+        // The existing shared assignments become the Extended Home mode. The
+        // three newly exposed mode banks are intentionally unassigned; silently
+        // cloning twelve controls into all four banks is surprising and can
+        // cause unintended radio actions.
+        for (int note : ctr2ButtonNotes(true))
+            converted.buttons.insert(note, action("disabled"));
         for (int button = 0; button < 6; ++button) {
-            mapping.buttons.insert(shortNotes[mode][button], action(shortActions[button]));
-            mapping.buttons.insert(longNotes[mode][button], action(longActions[button]));
+            copyBinding(button + 1, button + 1);
+            copyBinding(button + 25, button + 11);
+        }
+    } else {
+        // Normal mode is shared by every knob mode, so retain the Extended Home
+        // assignments when reducing the layout back to twelve controls.
+        for (int button = 0; button < 6; ++button) {
+            copyBinding(button + 1, button + 1);
+            copyBinding(button + 11, button + 25);
         }
     }
-    return mapping;
+    return converted;
+}
+
+QString ctr2ButtonLabel(bool extendedButtons, int note) {
+    const Ctr2ButtonDescriptor descriptor = ctr2ButtonDescriptor(extendedButtons, note);
+    if (descriptor.buttonLabel.isEmpty())
+        return QString();
+    if (!extendedButtons)
+        return QStringLiteral("%1 %2").arg(descriptor.buttonLabel, descriptor.pressType);
+    const QString modeLabel = descriptor.knobMode == QStringLiteral("Home")
+                                  ? QStringLiteral("Home knob mode")
+                                  : descriptor.knobMode;
+    return QStringLiteral("%1 %2 %3")
+        .arg(modeLabel, descriptor.buttonLabel, descriptor.pressType);
+}
+
+QPair<int, int> ctr2KnobButtonNotes(bool extendedButtons, int cc) {
+    if (cc < 100 || cc > 107)
+        return {-1, -1};
+    // The published manual documents the normal sequential pairs at 40-55.
+    // Lynovation's Extended BTN clarification relocates the knob Button block
+    // to 60-95 so it cannot collide with physical-button notes 1-48. The
+    // eight current CC100-107 controls occupy the first eight pairs, 60-75.
+    const int firstNote = extendedButtons ? 60 : 40;
+    const int counterClockwise = firstNote + ((cc - 100) * 2);
+    return {counterClockwise, counterClockwise + 1};
 }
 
 static void upgradeKnownCtr2Default(DeviceMapping *mapping) {
@@ -142,6 +261,49 @@ static void upgradeKnownCtr2Default(DeviceMapping *mapping) {
             saved->output = KnobOutput::SliderA;
         }
     }
+}
+
+static void upgradeDuplicatedExtendedButtonBanks(DeviceMapping *mapping,
+                                                  int defaultsRevision) {
+    if (!mapping || mapping->profile != Profile::Ctr2 || !mapping->extendedButtons
+        || defaultsRevision >= 3)
+        return;
+
+    const auto equivalent = [mapping](int firstNote, int secondNote) {
+        const ButtonBinding first = mapping->buttons.value(
+            firstNote, {QStringLiteral("disabled"), QString()});
+        const ButtonBinding second = mapping->buttons.value(
+            secondNote, {QStringLiteral("disabled"), QString()});
+        if (first.action != second.action)
+            return false;
+        if (first.action != QStringLiteral("macro"))
+            return true;
+        return mapping->macros.value(first.macroId).command
+               == mapping->macros.value(second.macroId).command;
+    };
+
+    // The first 1.0.4.1 test candidate cloned Home into every mode when the
+    // checkbox was enabled. Repair only an exact semantic four-bank clone; if
+    // the operator changed even one expanded assignment, preserve the map.
+    for (int mode = 1; mode < 4; ++mode) {
+        for (int button = 0; button < 6; ++button) {
+            if (!equivalent(button + 1, mode * 6 + button + 1)
+                || !equivalent(button + 25, 25 + mode * 6 + button))
+                return;
+        }
+    }
+
+    for (int note = 7; note <= 24; ++note)
+        mapping->buttons[note] = action("disabled");
+    for (int note = 31; note <= 48; ++note)
+        mapping->buttons[note] = action("disabled");
+
+    QMap<QString, MacroDefinition> usedMacros;
+    for (auto it = mapping->buttons.cbegin(); it != mapping->buttons.cend(); ++it) {
+        if (it->action == QStringLiteral("macro") && mapping->macros.contains(it->macroId))
+            usedMacros.insert(it->macroId, mapping->macros.value(it->macroId));
+    }
+    mapping->macros = usedMacros;
 }
 
 DeviceMapping tinyMidiDefault() {
@@ -376,7 +538,7 @@ QString knobOutputDescription(KnobOutput output) {
             "Absolute CC values 0 through 127 from a CTR2 Slider B output. It is decoded like sliderA; use it when that CTR2 knob mode is configured as Slider B.");
     case KnobOutput::Button:
         return QStringLiteral(
-            "Directional NoteOn pair from a CTR2 MIDI Button output, not a CC value. The cc field selects the pair: CC100 is notes 40/41 through CC107 at notes 54/55; the even note is negative and the odd note is positive.");
+            "Directional NoteOn pair from a CTR2 MIDI Button output, not a CC value. In normal mode CC100 uses notes 40/41 through CC107 at 54/55. Extended Button Mode relocates those eight pairs to 60/61 through 74/75 within the manufacturer-defined 60-95 knob Button range. The first note is counter-clockwise and the second is clockwise.");
     }
     return QString();
 }
@@ -395,10 +557,27 @@ QJsonObject toJson(const DeviceMapping &mapping) {
     comments.append(QStringLiteral(
         "The adjust_* button actions select the function controlled by a knob whose action is selected_adjustment."));
     comments.append(QStringLiteral(
+        "Set buttonMode to \"normal\" or \"extended\" to match the Extended BTN setting in CTR2-MIDI. QK4 cannot detect that device setting automatically."));
+    comments.append(QStringLiteral(
+        "Each buttons entry identifies its physical button, MIDI note, press type, knob mode, and mapped action or macro. buttonLabel, pressType, and knobMode are explanatory fields; QK4 derives the control from note when loading."));
+    comments.append(QStringLiteral(
         "A knob's output describes the MIDI messages emitted by that CTR2 knob mode; it does not select the radio action. The output keyword must match the output configured on the CTR2. See _knobOutputs."));
     comments.append(QStringLiteral(
         "Loading replaces the complete CTR2 mapping; mappings are never merged."));
     root.insert(QStringLiteral("_comments"), comments);
+
+    QJsonArray buttonModeGuide;
+    buttonModeGuide.append(QStringLiteral(
+        "normal: the same 12 functions are used in every knob mode. Short presses are MIDI notes 1-6; long presses are notes 11-16."));
+    buttonModeGuide.append(QStringLiteral(
+        "extended: each device knob mode has its own 12 functions. Home uses short notes 1-6 and long notes 25-30; Knob mode 1 uses 7-12 and 31-36; Knob mode 2 uses 13-18 and 37-42; Knob mode 3 uses 19-24 and 43-48."));
+    buttonModeGuide.append(QStringLiteral(
+        "When extended mode is first enabled in QK4, the 12 normal assignments become the Home assignments. The 36 newly exposed Knob mode 1-3 assignments start disabled; they are not copies of Home."));
+    buttonModeGuide.append(QStringLiteral(
+        "When a knob control uses MIDI Button output, normal mode uses directional notes 40-55. Extended mode relocates CC100-107 to notes 60-75 within the manufacturer-defined 60-95 range so notes 40-48 remain available to physical buttons."));
+    buttonModeGuide.append(QStringLiteral(
+        "Every listed button can use a predefined action keyword or action \"macro\" with a supported K4 Programmer's Reference command."));
+    root.insert(QStringLiteral("_buttonModeGuide"), buttonModeGuide);
 
     QJsonArray knobOutputGuide;
     knobOutputGuide.append(QStringLiteral(
@@ -442,7 +621,9 @@ QJsonObject toJson(const DeviceMapping &mapping) {
     root.insert(QStringLiteral("profile"), static_cast<int>(mapping.profile));
     root.insert(QStringLiteral("keyingMode"), static_cast<int>(mapping.keyingMode));
     root.insert(QStringLiteral("straightKeyInput"), static_cast<int>(mapping.straightKeyInput));
-    root.insert(QStringLiteral("extendedButtons"), mapping.extendedButtons);
+    root.insert(QStringLiteral("buttonMode"),
+                mapping.extendedButtons ? QStringLiteral("extended")
+                                        : QStringLiteral("normal"));
     root.insert(QStringLiteral("tipRingSwapped"), mapping.tipRingSwapped);
     root.insert(QStringLiteral("cwInputEnabled"), mapping.cwInputEnabled);
     if (mapping.profile == Profile::Custom) {
@@ -455,6 +636,24 @@ QJsonObject toJson(const DeviceMapping &mapping) {
     QJsonArray knobs;
     for (auto it = mapping.knobs.cbegin(); it != mapping.knobs.cend(); ++it) {
         QJsonObject entry;
+        const Ctr2KnobDescriptor descriptor = ctr2KnobDescriptor(it.key());
+        if (!descriptor.controlLabel.isEmpty()) {
+            entry.insert(QStringLiteral("controlLabel"), descriptor.controlLabel);
+            entry.insert(QStringLiteral("knobMode"), descriptor.knobMode);
+            entry.insert(QStringLiteral("gesture"), descriptor.gesture);
+            const QPair<int, int> normalNotes = ctr2KnobButtonNotes(false, it.key());
+            const QPair<int, int> extendedNotes = ctr2KnobButtonNotes(true, it.key());
+            QJsonObject normalPair;
+            normalPair.insert(QStringLiteral("counterClockwise"), normalNotes.first);
+            normalPair.insert(QStringLiteral("clockwise"), normalNotes.second);
+            QJsonObject extendedPair;
+            extendedPair.insert(QStringLiteral("counterClockwise"), extendedNotes.first);
+            extendedPair.insert(QStringLiteral("clockwise"), extendedNotes.second);
+            QJsonObject buttonOutputNotes;
+            buttonOutputNotes.insert(QStringLiteral("normal"), normalPair);
+            buttonOutputNotes.insert(QStringLiteral("extended"), extendedPair);
+            entry.insert(QStringLiteral("buttonOutputNotes"), buttonOutputNotes);
+        }
         entry.insert(QStringLiteral("cc"), it.key());
         entry.insert(QStringLiteral("action"), it->action);
         entry.insert(QStringLiteral("output"), outputName(it->output));
@@ -465,6 +664,13 @@ QJsonObject toJson(const DeviceMapping &mapping) {
     QJsonArray buttons;
     for (auto it = mapping.buttons.cbegin(); it != mapping.buttons.cend(); ++it) {
         QJsonObject entry;
+        const Ctr2ButtonDescriptor descriptor =
+            ctr2ButtonDescriptor(mapping.extendedButtons, it.key());
+        if (!descriptor.buttonLabel.isEmpty()) {
+            entry.insert(QStringLiteral("buttonLabel"), descriptor.buttonLabel);
+            entry.insert(QStringLiteral("pressType"), descriptor.pressType);
+            entry.insert(QStringLiteral("knobMode"), descriptor.knobMode);
+        }
         entry.insert(QStringLiteral("note"), it.key());
         entry.insert(QStringLiteral("action"), it->action);
         if (!it->macroId.isEmpty())
@@ -495,7 +701,8 @@ bool fromJson(const QJsonObject &root, DeviceMapping *mapping, QString *error) {
         return fail(QStringLiteral("No destination mapping was provided"));
     if (root.value(QStringLiteral("format")).toString() != QStringLiteral("qk4-ctr2-midi-mapping"))
         return fail(QStringLiteral("Not a QK4 CTR2 mapping file"));
-    if (root.value(QStringLiteral("version")).toInt(-1) != FileVersion)
+    const int fileVersion = root.value(QStringLiteral("version")).toInt(-1);
+    if (fileVersion < 1 || fileVersion > FileVersion)
         return fail(QStringLiteral("Unsupported CTR2 mapping version"));
 
     DeviceMapping parsed;
@@ -510,7 +717,19 @@ bool fromJson(const QJsonObject &root, DeviceMapping *mapping, QString *error) {
     parsed.straightKeyInput = root.value(QStringLiteral("straightKeyInput")).toInt() == 1
                                   ? PhysicalInput::Right
                                   : PhysicalInput::Left;
-    parsed.extendedButtons = root.value(QStringLiteral("extendedButtons")).toBool(false);
+    const QJsonValue buttonMode = root.value(QStringLiteral("buttonMode"));
+    if (buttonMode.isUndefined()) {
+        // v1 files written before buttonMode used this boolean. Keep them loadable.
+        if (fileVersion >= 2)
+            return fail(QStringLiteral("CTR2 mapping is missing buttonMode"));
+        parsed.extendedButtons = root.value(QStringLiteral("extendedButtons")).toBool(false);
+    } else if (!buttonMode.isString()
+               || (buttonMode.toString() != QStringLiteral("normal")
+                   && buttonMode.toString() != QStringLiteral("extended"))) {
+        return fail(QStringLiteral("Invalid CTR2 button mode; use normal or extended"));
+    } else {
+        parsed.extendedButtons = buttonMode.toString() == QStringLiteral("extended");
+    }
     parsed.tipRingSwapped = root.value(QStringLiteral("tipRingSwapped")).toBool(false);
     parsed.cwInputEnabled = root.value(QStringLiteral("cwInputEnabled")).toBool(true);
     parsed.customDitStatus = root.value(QStringLiteral("customDitStatus")).toInt(0x90) & 0xf0;
@@ -529,6 +748,9 @@ bool fromJson(const QJsonObject &root, DeviceMapping *mapping, QString *error) {
         parsed.knobs.insert(cc, KnobBinding{actionId, output});
     }
 
+    const QVector<int> validCtr2ButtonNotes = parsed.profile == Profile::Ctr2
+                                                  ? ctr2ButtonNotes(parsed.extendedButtons)
+                                                  : QVector<int>();
     for (const QJsonValue &value : root.value(QStringLiteral("buttons")).toArray()) {
         const QJsonObject entry = value.toObject();
         const int note = entry.value(QStringLiteral("note")).toInt(-1);
@@ -537,6 +759,12 @@ bool fromJson(const QJsonObject &root, DeviceMapping *mapping, QString *error) {
         if (note < 0 || note > 127 || !isSupportedButtonAction(actionId) ||
             (actionId == QStringLiteral("macro") && macroId.isEmpty()))
             return fail(QStringLiteral("Invalid button mapping"));
+        if (parsed.profile == Profile::Ctr2 && !validCtr2ButtonNotes.contains(note)) {
+            return fail(QStringLiteral("MIDI note %1 is not valid in CTR2 %2 button mode")
+                            .arg(note)
+                            .arg(parsed.extendedButtons ? QStringLiteral("extended")
+                                                        : QStringLiteral("normal")));
+        }
         parsed.buttons.insert(note, ButtonBinding{actionId, macroId});
     }
 
@@ -558,7 +786,9 @@ bool fromJson(const QJsonObject &root, DeviceMapping *mapping, QString *error) {
     // A legacy built-in map may contain customized buttons or macros while its
     // unchanged factory knob bindings still need the SliderA correction.
     // Current-revision maps preserve an explicit operator choice of WheelA.
-    if (root.value(QStringLiteral("defaultsRevision")).toInt(0) < Ctr2DefaultsRevision)
+    const int defaultsRevision = root.value(QStringLiteral("defaultsRevision")).toInt(0);
+    upgradeDuplicatedExtendedButtonBanks(&parsed, defaultsRevision);
+    if (defaultsRevision < Ctr2DefaultsRevision)
         upgradeKnownCtr2Default(&parsed);
     *mapping = parsed;
     if (error)

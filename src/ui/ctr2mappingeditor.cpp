@@ -176,21 +176,6 @@ QLabel *sectionLabel(const QString &text, QWidget *parent) {
     return label;
 }
 
-QString buttonLabel(bool extended, int note) {
-    if (!extended) {
-        if (note >= 1 && note <= 6)
-            return QString("Button %1 short").arg(note);
-        return QString("Button %1 long").arg(note - 10);
-    }
-    const char *modeNames[] = {"Home", "Mode 1", "Mode 2", "Mode 3"};
-    if (note >= 1 && note <= 24) {
-        const int index = note - 1;
-        return QString("%1 · Button %2 short").arg(modeNames[index / 6]).arg(index % 6 + 1);
-    }
-    const int index = note - 25;
-    return QString("%1 · Button %2 long").arg(modeNames[index / 6]).arg(index % 6 + 1);
-}
-
 QString knobControlLabel(int cc) {
     static const char *modeNames[] = {"Home", "Mode 1", "Mode 2", "Mode 3"};
     const int index = qBound(0, cc - 100, 7);
@@ -310,7 +295,6 @@ Ctr2MappingEditor::Ctr2MappingEditor(Ctr2MidiDevice *device, QWidget *parent)
     m_keyingMode->addItem("Paddles", static_cast<int>(MidiMapping::KeyingMode::Paddles));
     m_keyingMode->addItem("Straight key + PTT", static_cast<int>(MidiMapping::KeyingMode::StraightKey));
     m_tipRingSwapped = new QCheckBox("Swap tip/ring", this);
-    m_extendedButtons = new QCheckBox("Extended buttons (4 modes)", this);
     for (auto *combo : {m_keyingMode}) {
         combo->setMinimumHeight(40);
         combo->setStyleSheet(comboStyle());
@@ -318,7 +302,6 @@ Ctr2MappingEditor::Ctr2MappingEditor(Ctr2MidiDevice *device, QWidget *parent)
     keyingRow->addWidget(m_cwEnabled);
     keyingRow->addWidget(m_keyingMode);
     keyingRow->addWidget(m_tipRingSwapped);
-    keyingRow->addWidget(m_extendedButtons);
     keyingRow->addStretch();
     root->addLayout(keyingRow);
 
@@ -381,6 +364,16 @@ Ctr2MappingEditor::Ctr2MappingEditor(Ctr2MidiDevice *device, QWidget *parent)
                                   .arg(K4Styles::Colors::TextGray)
                                   .arg(K4Styles::Dimensions::FontSizeLarge));
     root->addWidget(buttonHelp);
+    m_extendedButtons = new QCheckBox("Extended Button Mode", this);
+    root->addWidget(m_extendedButtons);
+    auto *extendedButtonHelp = new QLabel(
+        "Enable this only when Extended BTN Mode is also enabled in CTR2-MIDI. It expands the "
+        "list from 12 shared functions to 48 functions across Home and Knob modes 1-3.", this);
+    extendedButtonHelp->setWordWrap(true);
+    extendedButtonHelp->setStyleSheet(QString("color:%1;font-size:%2px;")
+                                          .arg(K4Styles::Colors::TextGray)
+                                          .arg(K4Styles::Dimensions::FontSizeLarge));
+    root->addWidget(extendedButtonHelp);
     m_buttonRowsLayout = new QVBoxLayout;
     m_buttonRowsLayout->setSpacing(5);
     root->addLayout(m_buttonRowsLayout);
@@ -419,23 +412,7 @@ Ctr2MappingEditor::Ctr2MappingEditor(Ctr2MidiDevice *device, QWidget *parent)
     });
     connect(m_extendedButtons, &QCheckBox::toggled, this, [this](bool extended) {
         if (m_loading) return;
-        MidiMapping::DeviceMapping &draft = m_draft;
-        QMap<int, MidiMapping::ButtonBinding> converted;
-        if (extended) {
-            for (int mode = 0; mode < 4; ++mode) {
-                for (int button = 0; button < 6; ++button) {
-                    converted.insert(mode * 6 + button + 1, draft.buttons.value(button + 1));
-                    converted.insert(25 + mode * 6 + button, draft.buttons.value(button + 11));
-                }
-            }
-        } else {
-            for (int button = 0; button < 6; ++button) {
-                converted.insert(button + 1, draft.buttons.value(button + 1));
-                converted.insert(button + 11, draft.buttons.value(button + 25));
-            }
-        }
-        draft.extendedButtons = extended;
-        draft.buttons = converted;
+        m_draft = MidiMapping::withCtr2ButtonMode(m_draft, extended);
         rebuildButtonRows();
         setDirty();
     });
@@ -655,28 +632,15 @@ void Ctr2MappingEditor::rebuildButtonRows() {
     qDeleteAll(m_buttonRows);
     m_buttonRows.clear();
 
-    QVector<int> notes;
-    if (m_draft.extendedButtons) {
-        for (int mode = 0; mode < 4; ++mode) {
-            for (int button = 0; button < 6; ++button) {
-                notes.append(mode * 6 + button + 1);       // Short press
-                notes.append(25 + mode * 6 + button);      // Long press
-            }
-        }
-    } else {
-        for (int button = 1; button <= 6; ++button) {
-            notes.append(button);       // Short press
-            notes.append(button + 10);  // Long press
-        }
-    }
+    const QVector<int> notes = MidiMapping::ctr2ButtonNotes(m_draft.extendedButtons);
     for (int note : notes) {
         auto *container = new QWidget(this);
         container->setStyleSheet("background:transparent;");
         auto *rowLayout = new QHBoxLayout(container);
         rowLayout->setContentsMargins(0, 0, 0, 0);
         rowLayout->setSpacing(7);
-        auto *label = new QLabel(buttonLabel(m_draft.extendedButtons, note), container);
-        label->setMinimumWidth(180);
+        auto *label = new QLabel(MidiMapping::ctr2ButtonLabel(m_draft.extendedButtons, note), container);
+        label->setMinimumWidth(m_draft.extendedButtons ? 245 : 180);
         auto *actionCombo = new Ctr2InWindowComboBox("SELECT BUTTON ACTION", container);
         for (const QString &id : MidiMapping::supportedButtonActions())
             actionCombo->addItem(MidiMapping::buttonActionLabel(id), id);
@@ -720,10 +684,10 @@ void Ctr2MappingEditor::updateButtonBinding(ButtonRow *row) {
     MidiMapping::ButtonBinding binding;
     binding.action = action;
     if (action == QStringLiteral("macro")) {
-        const QString existing = m_draft.buttons.value(row->note).macroId;
-        binding.macroId = existing.isEmpty() ? QString("button-%1").arg(row->note) : existing;
+        binding.macroId = QString("button-%1").arg(row->note);
         m_draft.macros[binding.macroId] = {
-            QString("Button %1").arg(row->note), row->command->text().trimmed()};
+            MidiMapping::ctr2ButtonLabel(m_draft.extendedButtons, row->note),
+            row->command->text().trimmed()};
     }
     m_draft.buttons[row->note] = binding;
     setDirty();

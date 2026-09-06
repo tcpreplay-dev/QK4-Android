@@ -14,6 +14,158 @@ the appropriate control surface. When a knob mode is mapped to **Selected
 adjustment**, pressing an **Adjust:** button opens and selects the surface,
 displays `CTR2 KNOB: ...`, and assigns the knob to it.
 
+## Understanding CTR2 modes
+
+CTR2-MIDI has four knob modes: **Home**, **Knob mode 1**, **Knob mode 2**, and
+**Knob mode 3**. Each mode has a normal **turn** control and a **push and turn**
+control. These eight controls send CC100 through CC107 respectively.
+
+CTR2 also has two settings whose similar names can be confusing:
+
+- **Extended BTN Mode** changes the six front-panel buttons from 12 shared
+  short/long functions to 48 mode-specific functions. The **Extended Button
+  Mode** checkbox in QK4 must match this device setting.
+- **Extended Paddle Mode** changes the rear paddle jack from left/right iambic
+  paddle input to straight-key and PTT input. This is selected in QK4 with the
+  **Paddles** or **Straight key + PTT** choice.
+
+Changing one setting on CTR2 does not automatically change the other.
+
+## Front-panel button notes
+
+In Normal Button Mode, the same short/long assignments remain active in every
+knob mode.
+
+| Physical control | Short-press note | Long-press note | Knob mode |
+|---|---:|---:|---|
+| Button 1 | 1 | 11 | All knob modes |
+| Button 2 | 2 | 12 | All knob modes |
+| Button 3 | 3 | 13 | All knob modes |
+| Button 4 | 4 | 14 | All knob modes |
+| Button 5 | 5 | 15 | All knob modes |
+| Button 6 | 6 | 16 | All knob modes |
+
+In Extended Button Mode, each knob mode has its own six short-press and six
+long-press assignments.
+
+When Extended Button Mode is first enabled in QK4, the existing 12 shared
+assignments are retained as the Home knob mode assignments. The newly exposed
+Knob mode 1, 2, and 3 assignments start as **Disabled**; QK4 does not duplicate
+the Home actions into those modes. Turning Extended Button Mode off retains the
+Home assignments as the 12 shared Normal Button Mode assignments.
+
+| Physical control | Home short/long | Mode 1 short/long | Mode 2 short/long | Mode 3 short/long |
+|---|---:|---:|---:|---:|
+| Button 1 | 1 / 25 | 7 / 31 | 13 / 37 | 19 / 43 |
+| Button 2 | 2 / 26 | 8 / 32 | 14 / 38 | 20 / 44 |
+| Button 3 | 3 / 27 | 9 / 33 | 15 / 39 | 21 / 45 |
+| Button 4 | 4 / 28 | 10 / 34 | 16 / 40 | 22 / 46 |
+| Button 5 | 5 / 29 | 11 / 35 | 17 / 41 | 23 / 47 |
+| Button 6 | 6 / 30 | 12 / 36 | 18 / 42 | 24 / 48 |
+
+QK4 executes front-panel button actions when the button is released, matching
+CTR2-MIDI's NoteOn-on-release behavior.
+
+## Knob output formats and directional Button notes
+
+The output selected in QK4 must match the output programmed for that same knob
+control in CTR2-MIDI:
+
+- **Wheel A** is a relative, speed-sensitive value centered on 64. It is the
+  normal choice for accelerated VFO tuning.
+- **Wheel B** sends one directional step using values 1 and 126. Use
+  **Wheel B reversed** if those directions are reversed for the selected app.
+- **Slider A** and **Slider B** send absolute positions from 0 through 127.
+  QK4 uses position changes as fine directional steps and establishes a new
+  baseline when a device connects or a mapping changes, preventing jumps.
+- **Button direction pair** sends one NoteOn number for counter-clockwise and
+  another for clockwise instead of sending a CC value.
+
+The published CTR2-MIDI manual shows knob Button notes 40–55 for Normal Button
+Mode. Lynovation subsequently clarified that Extended BTN Mode moves the knob
+Button range to 60–95 so it does not collide with the extended front-panel
+buttons. The sequential assignments are also documented in Lynovation's
+CTR2-Dial manual. CTR2-MIDI's eight knob controls use the first eight pairs:
+
+| Knob control | CC | Normal CCW/CW notes | Extended CCW/CW notes |
+|---|---:|---:|---:|
+| Home turn | 100 | 40 / 41 | 60 / 61 |
+| Home push and turn | 101 | 42 / 43 | 62 / 63 |
+| Knob mode 1 turn | 102 | 44 / 45 | 64 / 65 |
+| Knob mode 1 push and turn | 103 | 46 / 47 | 66 / 67 |
+| Knob mode 2 turn | 104 | 48 / 49 | 68 / 69 |
+| Knob mode 2 push and turn | 105 | 50 / 51 | 70 / 71 |
+| Knob mode 3 turn | 106 | 52 / 53 | 72 / 73 |
+| Knob mode 3 push and turn | 107 | 54 / 55 | 74 / 75 |
+
+Notes 76–95 are assigned to CC108–CC117 in Lynovation's larger 18-control
+CTR2-Dial table. CTR2-MIDI has only the eight CC100–CC107 knob controls, so it
+uses notes 60–75.
+
+## Paddle, straight-key, and PTT notes
+
+Extended BTN Mode also relocates the paddle-jack notes so they remain separate
+from the 48 front-panel buttons:
+
+| QK4 keying selection | Extended Button Mode off | Extended Button Mode on |
+|---|---:|---:|
+| Paddles | Left 20, right 21 | Left 96, right 97 |
+| Straight key + PTT | Tip 30, ring 31 | Tip 98, ring 99 |
+
+**Swap tip/ring** reverses the two physical jack assignments. Straight-key and
+external-keyer input sends the K4 raw key-down/key-up commands and generates a
+local QK4 sidetone; K4 monitor audio is not required. Paddle input continues to
+use QK4's local iambic keyer and its existing local sidetone.
+
+## Editing a saved mapping file
+
+QK4 saves complete, user-editable `.qk4ctr2map` JSON files. Each button entry
+states the physical label, MIDI note, press type, knob mode, and mapped action:
+
+```json
+{
+    "buttonLabel": "Button 3",
+    "knobMode": "Knob mode 2",
+    "note": 15,
+    "pressType": "short",
+    "action": "nr_toggle"
+}
+```
+
+To use a custom K4 command, set `action` to `macro`, assign a macro id, and
+define that id in the file's `macros` list:
+
+```json
+{
+    "buttonLabel": "Button 3",
+    "knobMode": "Knob mode 2",
+    "note": 15,
+    "pressType": "short",
+    "action": "macro",
+    "macro": "contest_message"
+}
+```
+
+```json
+{
+    "id": "contest_message",
+    "label": "Contest message",
+    "command": "KY CQ TEST;"
+}
+```
+
+Edit `action`, optional `macro`, and the corresponding macro definition. The
+`buttonLabel`, `knobMode`, and `pressType` fields explain the note assignment;
+QK4 derives the physical control from `note` when loading. Set the top-level
+`buttonMode` to `normal` or `extended` to match CTR2-MIDI. Loading a file
+replaces the complete current mapping rather than merging entries.
+
+Every saved knob entry likewise identifies its control label, knob mode,
+gesture, CC number, selected QK4 action, output format, and its Normal and
+Extended directional notes if the knob is programmed for Button output. The
+file's `_buttonActions`, `_knobActions`, `_knobOutputs`, and guide sections list
+the supported keywords and explain their use.
+
 ## Adjustments that open QK4 controls
 
 | CTR2 adjustment | QK4 Mobile UI invoked |
@@ -82,5 +234,12 @@ not interpret or rewrite arbitrary K4 command sequences.
 For shared A/B controls, the current **B-SET** state determines which receiver
 is adjusted. Actions explicitly named Main or Sub always operate their named
 receiver.
+
+## References
+
+- [CTR2-MIDI Operation Manual v2.01.01a](https://ctr2.lynovation.com/wp-content/uploads/2026/03/CTR2-MIDI_Operation_Manual_v20101a.pdf)
+- [CTR2-Dial Firmware Manual v2.05.00](https://ctr2.lynovation.com/wp-content/uploads/2026/02/CTR2-Dial_Firmware_Manual_v20500.pdf)
+- [Elecraft K4 Programmer's Reference](https://ftp.elecraft.com/K4/Manuals%20Downloads/K4ProgrammersReferencerev.D12.html)
+- [Sample QK4 CTR2 mapping file](QK4-CTR2-Rate-KHZ-Sample.qk4ctr2map)
 
 [Return to the QK4 Android README](../README.md)
