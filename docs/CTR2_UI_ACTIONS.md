@@ -166,6 +166,64 @@ Extended directional notes if the knob is programmed for Button output. The
 file's `_buttonActions`, `_knobActions`, `_knobOutputs`, and guide sections list
 the supported keywords and explain their use.
 
+### Understanding `_buttonActions` and `_knobActions`
+
+All top-level names beginning with an underscore are documentation references;
+QK4 ignores them when loading the file. The actual assignments are the entries
+in the `buttons` and `knobs` arrays.
+
+`_buttonActions` is divided into two named groups so these different behaviors
+are not mixed together:
+
+- Immediate actions such as `band_up`, `nr_toggle`, and `tx_rx_toggle` perform
+  their function when the button is released.
+- Adjustment selectors beginning with `adjust_` do not continuously adjust a
+  setting themselves. They select what a knob will control and open the
+  corresponding QK4 control or feedback where available.
+
+Using adjustment selectors requires at least one knob whose action is
+`selected_adjustment`. This is a behavioral relationship, not a direct pairing
+between a particular MIDI note and CC:
+
+| Actual entry | Action | Role |
+|---|---|---|
+| An entry in `buttons` | `adjust_nr_level` | Select NR when that button is released |
+| An entry in `knobs` | `selected_adjustment` | Control whichever `adjust_*` function was selected most recently |
+
+The entries belong in separate arrays and can appear anywhere in those arrays.
+Their order and proximity in the file have no effect. This complete minimal
+example makes Button 3 select NR and makes the Home knob control the selected
+adjustment:
+
+```json
+{
+    "knobs": [
+        {
+            "controlLabel": "Home turn",
+            "cc": 100,
+            "action": "selected_adjustment",
+            "output": "wheelA"
+        }
+    ],
+    "buttons": [
+        {
+            "buttonLabel": "Button 3",
+            "note": 3,
+            "pressType": "short",
+            "action": "adjust_nr_level"
+        }
+    ]
+}
+```
+
+The operator presses Button 3 to select NR and open its control, then turns the
+Home knob to change the NR level. Pressing a different `adjust_*` button makes
+that same knob control the newly selected function.
+
+For a knob that should always control one setting without first pressing a
+button, use a direct action from `_knobActions`. For example, assigning
+`nr_level` directly to CC105 makes CC105 permanently control NR.
+
 ## Adjustments that open QK4 controls
 
 | CTR2 adjustment | QK4 Mobile UI invoked |

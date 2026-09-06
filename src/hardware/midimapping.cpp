@@ -551,11 +551,13 @@ QJsonObject toJson(const DeviceMapping &mapping) {
     comments.append(QStringLiteral(
         "This is a user-editable QK4 CTR2 mapping. Action keywords are case-sensitive."));
     comments.append(QStringLiteral(
+        "Top-level names beginning with an underscore are documentation only. QK4 ignores those sections when loading the mapping; actual assignments are in buttons and knobs."));
+    comments.append(QStringLiteral(
         "For a predefined button function, copy a keyword from _buttonActions into the button's action field and remove its macro field."));
     comments.append(QStringLiteral(
         "For a custom K4 programmer command, use action \"macro\", set the button's macro field to an id, and define that id in macros. Commands must end with a semicolon."));
     comments.append(QStringLiteral(
-        "The adjust_* button actions select the function controlled by a knob whose action is selected_adjustment."));
+        "The _buttonActions reference includes immediate button functions and adjust_* selection functions. An adjust_* button selects what a knob mapped to selected_adjustment will control; the button does not perform the continuous adjustment by itself. See _buttonActionGuide."));
     comments.append(QStringLiteral(
         "Set buttonMode to \"normal\" or \"extended\" to match the Extended BTN setting in CTR2-MIDI. QK4 cannot detect that device setting automatically."));
     comments.append(QStringLiteral(
@@ -579,6 +581,49 @@ QJsonObject toJson(const DeviceMapping &mapping) {
         "Every listed button can use a predefined action keyword or action \"macro\" with a supported K4 Programmer's Reference command."));
     root.insert(QStringLiteral("_buttonModeGuide"), buttonModeGuide);
 
+    QJsonArray buttonActionGuide;
+    buttonActionGuide.append(QStringLiteral(
+        "_buttonActions is a reference list, divided into immediateActions and adjustmentSelectors. Copy a keyword into an entry in the actual buttons array; the reference list does not assign any controls."));
+    buttonActionGuide.append(QStringLiteral(
+        "Immediate button actions, such as band_up, nr_toggle, and tx_rx_toggle, perform their function as soon as the mapped button is released."));
+    buttonActionGuide.append(QStringLiteral(
+        "Actions beginning with adjust_, such as adjust_nr_level, are adjustment selectors. Pressing that button selects a function, opens the related QK4 control or feedback where available, and waits for knob movement."));
+    buttonActionGuide.append(QStringLiteral(
+        "To use an adjust_* button, assign selected_adjustment to one entry in the actual knobs array. That knob then controls whichever adjust_* button was pressed most recently."));
+    buttonActionGuide.append(QStringLiteral(
+        "Example: assign adjust_nr_level to a button and selected_adjustment to CC100. Press the button to select NR and open its control, then turn CC100 to change the NR level."));
+    buttonActionGuide.append(QStringLiteral(
+        "The button and knob entries are independent entries in separate arrays. They do not need to be adjacent or appear in any particular order; QK4 links them by the adjust_* and selected_adjustment action types at runtime."));
+    buttonActionGuide.append(QStringLiteral(
+        "For a knob that should always control one function without a selection button, copy a direct keyword such as nr_level from _knobActions into that knob's action field instead."));
+    root.insert(QStringLiteral("_buttonActionGuide"), buttonActionGuide);
+
+    QJsonObject selectedAdjustmentExample;
+    selectedAdjustmentExample.insert(
+        QStringLiteral("purpose"),
+        QStringLiteral("Button 3 selects NR; the Home knob then adjusts the selected function."));
+    selectedAdjustmentExample.insert(
+        QStringLiteral("pairingRule"),
+        QStringLiteral("No note-to-CC pairing exists. Any button using an adjust_* action selects the function for any knob using selected_adjustment."));
+    selectedAdjustmentExample.insert(
+        QStringLiteral("ordering"),
+        QStringLiteral("The entries belong in separate buttons and knobs arrays. Their order and physical proximity in this file do not matter."));
+    selectedAdjustmentExample.insert(
+        QStringLiteral("buttonArrayEntry"),
+        QJsonObject{{QStringLiteral("note"), 3},
+                    {QStringLiteral("action"), QStringLiteral("adjust_nr_level")}});
+    selectedAdjustmentExample.insert(
+        QStringLiteral("knobArrayEntry"),
+        QJsonObject{{QStringLiteral("cc"), 100},
+                    {QStringLiteral("action"), QStringLiteral("selected_adjustment")},
+                    {QStringLiteral("output"), QStringLiteral("wheelA")}});
+    selectedAdjustmentExample.insert(
+        QStringLiteral("operatorSequence"),
+        QJsonArray{QStringLiteral("Press Button 3 to select NR and open its QK4 control."),
+                   QStringLiteral("Turn the Home knob (CC100) to adjust NR."),
+                   QStringLiteral("Press another adjust_* button to make that same knob control a different function.")});
+    root.insert(QStringLiteral("_selectedAdjustmentExample"), selectedAdjustmentExample);
+
     QJsonArray knobOutputGuide;
     knobOutputGuide.append(QStringLiteral(
         "Stock K4-Control Map 1: leave CC100 set to wheelA and CC101 through CC107 set to sliderA. No output selection is required unless you reprogram those modes in CTR2-MIDI."));
@@ -594,11 +639,20 @@ QJsonObject toJson(const DeviceMapping &mapping) {
         "Do not choose slider merely because the QK4 control is drawn as a slider, and do not choose wheel merely because the CTR2 has a physical knob. The MIDI message format configured in CTR2-MIDI is what determines this field."));
     root.insert(QStringLiteral("_knobOutputGuide"), knobOutputGuide);
 
-    QJsonObject buttonActionReference;
+    QJsonObject immediateButtonActions;
+    QJsonObject adjustmentSelectorButtonActions;
     for (const QString &action : supportedButtonActions()) {
-        if (action != QStringLiteral("macro"))
-            buttonActionReference.insert(action, buttonActionLabel(action));
+        if (action == QStringLiteral("macro"))
+            continue;
+        QJsonObject &group = knobActionForButtonAction(action).isEmpty()
+                                 ? immediateButtonActions
+                                 : adjustmentSelectorButtonActions;
+        group.insert(action, buttonActionLabel(action));
     }
+    QJsonObject buttonActionReference;
+    buttonActionReference.insert(QStringLiteral("immediateActions"), immediateButtonActions);
+    buttonActionReference.insert(QStringLiteral("adjustmentSelectors"),
+                                 adjustmentSelectorButtonActions);
     root.insert(QStringLiteral("_buttonActions"), buttonActionReference);
 
     QJsonObject knobActionReference;

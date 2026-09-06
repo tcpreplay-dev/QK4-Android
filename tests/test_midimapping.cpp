@@ -230,6 +230,30 @@ void TestMidiMapping::exportedFileDocumentsEveryPredefinedAction() {
     const QJsonObject json = MidiMapping::toJson(MidiMapping::ctr2Default());
     const QJsonArray comments = json.value(QStringLiteral("_comments")).toArray();
     QVERIFY(!comments.isEmpty());
+    QVERIFY(comments.at(1).toString().contains(QStringLiteral("documentation only")));
+
+    const QJsonArray buttonActionGuide =
+        json.value(QStringLiteral("_buttonActionGuide")).toArray();
+    QCOMPARE(buttonActionGuide.size(), 7);
+    QVERIFY(buttonActionGuide.at(0).toString().contains(QStringLiteral("reference list")));
+    QVERIFY(buttonActionGuide.at(2).toString().contains(QStringLiteral("adjust_")));
+    QVERIFY(buttonActionGuide.at(3).toString().contains(QStringLiteral("selected_adjustment")));
+    QVERIFY(buttonActionGuide.at(4).toString().contains(QStringLiteral("adjust_nr_level")));
+    QVERIFY(buttonActionGuide.at(5).toString().contains(QStringLiteral("do not need")));
+    QVERIFY(buttonActionGuide.at(6).toString().contains(QStringLiteral("nr_level")));
+
+    const QJsonObject selectedAdjustmentExample =
+        json.value(QStringLiteral("_selectedAdjustmentExample")).toObject();
+    QVERIFY(selectedAdjustmentExample.value(QStringLiteral("pairingRule")).toString()
+                .contains(QStringLiteral("No note-to-CC pairing")));
+    QVERIFY(selectedAdjustmentExample.value(QStringLiteral("ordering")).toString()
+                .contains(QStringLiteral("do not matter")));
+    QCOMPARE(selectedAdjustmentExample.value(QStringLiteral("buttonArrayEntry")).toObject()
+                 .value(QStringLiteral("action")).toString(),
+             QStringLiteral("adjust_nr_level"));
+    QCOMPARE(selectedAdjustmentExample.value(QStringLiteral("knobArrayEntry")).toObject()
+                 .value(QStringLiteral("action")).toString(),
+             QStringLiteral("selected_adjustment"));
 
     const QJsonArray knobs = json.value(QStringLiteral("knobs")).toArray();
     const QJsonObject homeTurn = knobs.at(0).toObject();
@@ -269,15 +293,29 @@ void TestMidiMapping::exportedFileDocumentsEveryPredefinedAction() {
     QVERIFY(knobOutputGuide.at(0).toString().contains(QStringLiteral("CC100")));
     QVERIFY(knobOutputGuide.at(0).toString().contains(QStringLiteral("CC101")));
 
-    const QJsonObject buttonActions = json.value(QStringLiteral("_buttonActions")).toObject();
+    const QJsonObject buttonActionGroups =
+        json.value(QStringLiteral("_buttonActions")).toObject();
+    const QJsonObject immediateActions =
+        buttonActionGroups.value(QStringLiteral("immediateActions")).toObject();
+    const QJsonObject adjustmentSelectors =
+        buttonActionGroups.value(QStringLiteral("adjustmentSelectors")).toObject();
     for (const QString &action : MidiMapping::supportedButtonActions()) {
         if (action == QStringLiteral("macro"))
             continue;
-        QVERIFY2(buttonActions.contains(action), qPrintable(action));
-        QCOMPARE(buttonActions.value(action).toString(), MidiMapping::buttonActionLabel(action));
+        const QJsonObject &group = MidiMapping::knobActionForButtonAction(action).isEmpty()
+                                       ? immediateActions
+                                       : adjustmentSelectors;
+        QVERIFY2(group.contains(action), qPrintable(action));
+        QCOMPARE(group.value(action).toString(), MidiMapping::buttonActionLabel(action));
     }
-    QCOMPARE(buttonActions.size(), MidiMapping::supportedButtonActions().size() - 1);
-    QVERIFY(!buttonActions.contains(QStringLiteral("macro")));
+    QCOMPARE(immediateActions.size() + adjustmentSelectors.size(),
+             MidiMapping::supportedButtonActions().size() - 1);
+    QVERIFY(!immediateActions.contains(QStringLiteral("macro")));
+    QVERIFY(!adjustmentSelectors.contains(QStringLiteral("macro")));
+    QVERIFY(immediateActions.contains(QStringLiteral("nr_toggle")));
+    QVERIFY(!immediateActions.contains(QStringLiteral("adjust_nr_level")));
+    QVERIFY(adjustmentSelectors.contains(QStringLiteral("adjust_nr_level")));
+    QVERIFY(!adjustmentSelectors.contains(QStringLiteral("nr_toggle")));
 
     const QJsonObject knobActions = json.value(QStringLiteral("_knobActions")).toObject();
     for (const QString &action : MidiMapping::supportedKnobActions()) {
