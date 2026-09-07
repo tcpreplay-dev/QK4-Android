@@ -221,6 +221,38 @@ bool HalikeyDevice::dahPressed() const {
     return m_confirmedDahState;
 }
 
+#elif defined(Q_OS_IOS)
+
+// iOS: no HID, serial, or (yet) CoreMIDI keying. Keep the class available so
+// the shared UI compiles; every entry point reports "not available".
+#include <QDebug>
+#include "settings/radiosettings.h"
+
+namespace {
+const char *const kIosUnavailable = "HaliKey / MIDI keying is not yet available on iOS.";
+}
+
+HalikeyDevice::HalikeyDevice(QObject *parent) : QObject(parent) {}
+HalikeyDevice::~HalikeyDevice() = default;
+bool HalikeyDevice::openPort(const QString &portName) {
+    m_portName = portName;
+    emit connectionError(QString::fromLatin1(kIosUnavailable));
+    return false;
+}
+void HalikeyDevice::closePort() {}
+bool HalikeyDevice::isConnected() const { return false; }
+QString HalikeyDevice::portName() const { return m_portName; }
+QStringList HalikeyDevice::availablePorts() { return {}; }
+QList<HaliKeyPortInfo> HalikeyDevice::availablePortsDetailed() { return {}; }
+QStringList HalikeyDevice::availableMidiDevices() { return {}; }
+void HalikeyDevice::startMidiScan() {}
+QString HalikeyDevice::statusMessage() const { return QString::fromLatin1(kIosUnavailable); }
+bool HalikeyDevice::ditPressed() const { return false; }
+bool HalikeyDevice::dahPressed() const { return false; }
+void HalikeyDevice::onRawDit(bool) {}
+void HalikeyDevice::onRawDah(bool) {}
+void HalikeyDevice::onRawPtt(bool) {}
+
 #else
 
 #include "halikeymidiworker.h"
