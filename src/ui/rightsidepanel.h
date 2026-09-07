@@ -94,6 +94,10 @@ signals:
     void lockBClicked();     // LOCK A right-click (LOCK B)
     void diversityClicked(); // SUB right-click
 
+    // iPad fine-tune buttons (A-/A+/B-/B+). steps = +/-1 tuning increment.
+    void tuneARequested(int steps);
+    void tuneBRequested(int steps);
+
 protected:
     bool eventFilter(QObject *watched, QEvent *event) override;
 
@@ -128,6 +132,12 @@ private:
     QPushButton *m_rateBtn;
     QPushButton *m_lockABtn;
     QPushButton *m_subBtn;
+
+    // iPad fine-tune buttons (regular layout only; null on phone)
+    QPushButton *m_tuneADownBtn = nullptr;
+    QPushButton *m_tuneAUpBtn = nullptr;
+    QPushButton *m_tuneBDownBtn = nullptr;
+    QPushButton *m_tuneBUpBtn = nullptr;
 
     // Qt maps a desktop secondary action to a right click. Android has no
     // such gesture, so a held touch triggers the same alternate action.

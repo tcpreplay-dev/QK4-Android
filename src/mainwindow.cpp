@@ -80,6 +80,8 @@
 #include <QJsonDocument>
 #include <QJsonParseError>
 #include <QMouseEvent>
+#include <QStyle>
+#include <QSlider>
 #include <algorithm>
 #include <QShowEvent>
 #include <QPointer>
@@ -248,6 +250,34 @@ QString temperatureStyle(int celsius) {
 constexpr int SstvKeyUpGuardMs = 500;
 constexpr int SstvDrainMarginMs = 150;
 constexpr int SstvAlcWarningLevel = 5;
+
+// Horizontal QSlider that jumps to the tapped position (groove-tap-to-set),
+// so a touch anywhere on the track moves the handle there rather than
+// page-stepping. Used for the RIT/XIT offset slider.
+class TouchSlider final : public QSlider {
+public:
+    using QSlider::QSlider;
+
+protected:
+    void mousePressEvent(QMouseEvent *event) override {
+        setValueFromX(event->pos().x());
+        event->accept();
+    }
+    void mouseMoveEvent(QMouseEvent *event) override {
+        if (event->buttons() & Qt::LeftButton) {
+            setValueFromX(event->pos().x());
+            event->accept();
+        }
+    }
+
+private:
+    void setValueFromX(int x) {
+        const int handleWidth = qMax(12, height() / 2);
+        const int span = qMax(1, width() - handleWidth);
+        const int pos = qBound(0, x - handleWidth / 2, span);
+        setValue(QStyle::sliderValueFromPosition(minimum(), maximum(), pos, span, invertedAppearance()));
+    }
+};
 } // namespace
 
 // Convert K4 tuning step index (VT command, 0-5) to Hz
@@ -1743,6 +1773,12 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_radioState, &RadioState::filterBandwidthBChanged, this, updateFilterDisplay);
     connect(m_radioState, &RadioState::ifShiftBChanged, this, updateFilterDisplay);
     connect(m_radioState, &RadioState::bSetChanged, this, updateFilterDisplay);
+    // Mode and DATA sub-mode change the valid BW/SHFT ranges (e.g. FSK is
+    // 150-800 Hz), so refresh the control ranges when they change too.
+    connect(m_radioState, &RadioState::modeChanged, this, updateFilterDisplay);
+    connect(m_radioState, &RadioState::modeBChanged, this, updateFilterDisplay);
+    connect(m_radioState, &RadioState::dataSubModeChanged, this, updateFilterDisplay);
+    connect(m_radioState, &RadioState::dataSubModeBChanged, this, updateFilterDisplay);
     connect(m_radioState, &RadioState::modeChanged, this, updateFilterDisplay);
     connect(m_radioState, &RadioState::modeBChanged, this, updateFilterDisplay);
     connect(m_radioState, &RadioState::dataSubModeChanged, this, updateFilterDisplay);
@@ -1803,11 +1839,17 @@ MainWindow::MainWindow(QWidget *parent)
             [this](int bw) { m_filterBWidget->setBandwidth(bw); });
     connect(m_radioState, &RadioState::ifShiftChanged, this, [this](int shift) { m_filterAWidget->setShift(shift); });
     connect(m_radioState, &RadioState::ifShiftBChanged, this, [this](int shift) { m_filterBWidget->setShift(shift); });
-    // Mode affects filter indicator shift center calculation
+    // Mode affects the filter indicator (shift centre, and FSK/AFSK draws two
+    // peaks). Use the full mode string so the DATA sub-mode (FSK/AFSK/PSK) is
+    // reflected, and refresh when the sub-mode alone changes.
     connect(m_radioState, &RadioState::modeChanged, this,
-            [this](RadioState::Mode mode) { m_filterAWidget->setMode(RadioState::modeToString(mode)); });
+            [this](RadioState::Mode) { m_filterAWidget->setMode(m_radioState->modeStringFull()); });
     connect(m_radioState, &RadioState::modeBChanged, this,
-            [this](RadioState::Mode mode) { m_filterBWidget->setMode(RadioState::modeToString(mode)); });
+            [this](RadioState::Mode) { m_filterBWidget->setMode(m_radioState->modeStringFullB()); });
+    connect(m_radioState, &RadioState::dataSubModeChanged, this,
+            [this](int) { m_filterAWidget->setMode(m_radioState->modeStringFull()); });
+    connect(m_radioState, &RadioState::dataSubModeBChanged, this,
+            [this](int) { m_filterBWidget->setMode(m_radioState->modeStringFullB()); });
 
     // RadioState signals -> Processing state updates (AGC, PRE, ATT, NB, NR)
     connect(m_radioState, &RadioState::processingChanged, this, &MainWindow::onProcessingChanged);
@@ -2690,15 +2732,19 @@ void MainWindow::showSettings() {
             m_radioState->setKeyerSpeed(boundedWpm);
         });
     }
-#ifdef Q_OS_ANDROID
+    // On touch platforms the dialog is an in-window overlay: fill the console
+    // so its "RETURN TO OPERATE" header button is on-screen and reachable.
+    // Without this the iPad opened it at its default size with the close
+    // button out of reach.
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     m_optionsDialog->setGeometry(centralWidget()->rect());
 #endif
     m_optionsDialog->show();
     m_optionsDialog->raise();
-#ifndef Q_OS_ANDROID
-    m_optionsDialog->activateWindow();
-#else
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     m_optionsDialog->setFocus(Qt::OtherFocusReason);
+#else
+    m_optionsDialog->activateWindow();
 #endif
 }
 
@@ -2917,7 +2963,7 @@ void MainWindow::setupUi() {
     m_rightPanelScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_rightPanelScroll->setVerticalScrollBarPolicy(K4Styles::isCompactLayout() ? Qt::ScrollBarAlwaysOn
                                                                                 : Qt::ScrollBarAlwaysOff);
-    m_rightPanelScroll->setFixedWidth(K4Styles::Dimensions::SidePanelWidth + sidePanelScrollExtra);
+    m_rightPanelScroll->setFixedWidth(K4Styles::Dimensions::RightSidePanelWidth + sidePanelScrollExtra);
     m_rightSidePanel = new RightSidePanel(m_rightPanelScroll);
     m_rightPanelScroll->setWidget(m_rightSidePanel);
     if (K4Styles::isCompactLayout()) {
@@ -3870,6 +3916,81 @@ void MainWindow::setupUi() {
     connect(m_rightSidePanel, &RightSidePanel::lockBClicked, this,
             [this]() { queueControlFeedback("LOCK_B", "VFO B lock changed"); m_tcpClient->sendCAT("SW151;"); });
 
+    // iPad fine-tune pad. Steps the VFO by the radio's current tuning step,
+    // mirroring the phone's A-/A+/B-/B+ buttons (signals only fire on iPad).
+    // Snap to the current tuning-step grid: from x.957 with a 100 Hz step,
+    // "-" lands on x.900 and "+" on the next x.000, matching the radio. Uses
+    // the same rate source as the panadapter drag/scroll tuning.
+    auto snapStep = [](qint64 cur, int dir, int stepHz) -> qint64 {
+        const qint64 base = (cur / stepHz) * stepHz; // floor to grid (freq > 0)
+        if (dir < 0)
+            return (cur == base) ? base - stepHz : base;
+        return base + stepHz;
+    };
+    connect(m_rightSidePanel, &RightSidePanel::tuneARequested, this, [this, snapStep](int dir) {
+        // While the blue edit field is open, A-/A+ change the selected digit
+        // (with carry) so a frequency can be entered entirely by touch.
+        if (m_vfoA->frequencyDisplay()->isEditing()) {
+            m_vfoA->frequencyDisplay()->nudgeCursorDigit(dir);
+            return;
+        }
+        if (!m_tcpClient->isConnected())
+            return;
+        const int stepHz = m_phoneTuneStepAHz > 0 ? m_phoneTuneStepAHz : tuningStepToHz(m_radioState->tuningStep());
+        const qint64 next = snapStep(static_cast<qint64>(m_radioState->vfoA()), dir, stepHz);
+        if (next > 0) {
+            const QString command = QString("FA%1;").arg(next, 11, 10, QChar('0'));
+            m_tcpClient->sendCAT(command);
+            m_radioState->parseCATCommand(command);
+        }
+    });
+    connect(m_rightSidePanel, &RightSidePanel::tuneBRequested, this, [this, snapStep](int dir) {
+        if (!m_tcpClient->isConnected())
+            return;
+        const int stepHz = m_phoneTuneStepBHz > 0 ? m_phoneTuneStepBHz : tuningStepToHz(m_radioState->tuningStepB());
+        const qint64 next = snapStep(static_cast<qint64>(m_radioState->vfoB()), dir, stepHz);
+        if (next > 0) {
+            const QString command = QString("FB%1;").arg(next, 11, 10, QChar('0'));
+            m_tcpClient->sendCAT(command);
+            m_radioState->parseCATCommand(command);
+        }
+    });
+
+    // FREQ ENT switches the main VFO's frequency display into the blue edit
+    // field, matching the radio (a dedicated key enters edit mode rather than
+    // tapping the frequency, which selects the tuning rate).
+    connect(m_rightSidePanel, &RightSidePanel::freqEntClicked, this, [this]() {
+        auto *fd = m_vfoA->frequencyDisplay();
+        // Toggle: FREQ ENT opens the blue field, and pressing it again commits
+        // (sends the entered frequency), so the whole entry is touch-only.
+        if (fd->isEditing())
+            fd->commitEdit();
+        else
+            fd->beginEdit();
+    });
+
+    // iPad: tapping a frequency digit sets the tuning rate at that place
+    // (1 Hz .. 10 kHz, the five rightmost digits), matching the radio. The
+    // compact layout wires this on the bottom bar instead.
+    if (!K4Styles::isCompactLayout()) {
+        connect(m_vfoA, &VFOWidget::tuningDigitSelected, this, [this](int digitFromRight) {
+            const int digit = qBound(0, digitFromRight, 4);
+            if (m_tcpClient->isConnected()) {
+                const QString command = QString("VT%1;").arg(digit);
+                m_tcpClient->sendCAT(command);
+                m_radioState->parseCATCommand(command);
+            }
+        });
+        connect(m_vfoB, &VFOWidget::tuningDigitSelected, this, [this](int digitFromRight) {
+            const int digit = qBound(0, digitFromRight, 4);
+            if (m_tcpClient->isConnected()) {
+                const QString command = QString("VT$%1;").arg(digit);
+                m_tcpClient->sendCAT(command);
+                m_radioState->parseCATCommand(command);
+            }
+        });
+    }
+
     // Resolve CTRL-panel actions from the state echoed by the K4.  These
     // confirmations remain useful after the drawer has closed, particularly
     // for controls whose state is not represented in the compact phone view.
@@ -4585,7 +4706,17 @@ void MainWindow::setupSpectrumPlaceholder(QWidget *parent) {
     m_panadapterA->setSecondaryPassbandColor(vfoBPassbandAlpha);
     m_panadapterA->setSecondaryMarkerColor(QColor(K4Styles::Colors::VfoBGreen));
     m_panadapterA->setSecondaryVisible(true);
-    layout->addWidget(m_panadapterA);
+    // Thin border around each panadapter so both panes are clearly visible in
+    // dual (A+B) mode, matching the radio's outlined panes.
+    m_panAFrame = new QFrame(m_spectrumContainer);
+    m_panAFrame->setObjectName("panFrameA");
+    m_panAFrame->setStyleSheet(QStringLiteral("#panFrameA { border: 1px solid #A0A0A0; }"));
+    {
+        auto *frameLayout = new QVBoxLayout(m_panAFrame);
+        frameLayout->setContentsMargins(1, 1, 1, 1);
+        frameLayout->addWidget(m_panadapterA);
+    }
+    layout->addWidget(m_panAFrame);
 
     // Sub panadapter for VFO B (right side) - QRhiWidget with Metal/DirectX/Vulkan
     m_panadapterB = new PanadapterRhiWidget(m_spectrumContainer);
@@ -4602,8 +4733,16 @@ void MainWindow::setupSpectrumPlaceholder(QWidget *parent) {
     m_panadapterB->setSecondaryPassbandColor(vfoAPassbandAlpha);
     m_panadapterB->setSecondaryMarkerColor(QColor(K4Styles::Colors::VfoACyan));
     m_panadapterB->setSecondaryVisible(true);
-    layout->addWidget(m_panadapterB);
-    m_panadapterB->hide(); // Start hidden (MainOnly mode)
+    m_panBFrame = new QFrame(m_spectrumContainer);
+    m_panBFrame->setObjectName("panFrameB");
+    m_panBFrame->setStyleSheet(QStringLiteral("#panFrameB { border: 1px solid #A0A0A0; }"));
+    {
+        auto *frameLayout = new QVBoxLayout(m_panBFrame);
+        frameLayout->setContentsMargins(1, 1, 1, 1);
+        frameLayout->addWidget(m_panadapterB);
+    }
+    layout->addWidget(m_panBFrame);
+    m_panBFrame->hide(); // Start hidden (MainOnly mode)
 
     // Span control buttons - overlay on panadapter (lower right, above freq labels)
     // Note: rgba used intentionally for transparent overlay effect on spectrum
@@ -6152,10 +6291,19 @@ void MainWindow::showRitXitAdjustment(bool preferXit) {
                                         K4Styles::Colors::InactiveGray));
     layout->addWidget(offsetValue);
 
+    // Slider for coarse offset (drag the handle); the -/+ buttons below give
+    // fine 10 Hz steps. Range is the K4's +/-9.99 kHz RIT/XIT span.
+    auto *offsetSlider = new TouchSlider(Qt::Horizontal, panel);
+    offsetSlider->setRange(-9990, 9990);
+    offsetSlider->setSingleStep(10);
+    offsetSlider->setPageStep(100);
+    offsetSlider->setMinimumHeight(40);
+    layout->addWidget(offsetSlider);
+
     auto usesBRegister = [this, &adjustXit]() {
         return adjustXit ? m_radioState->splitEnabled() : m_radioState->bSetEnabled();
     };
-    auto refreshTarget = [this, &adjustXit, ritTarget, xitTarget, targetDescription, offsetValue,
+    auto refreshTarget = [this, &adjustXit, ritTarget, xitTarget, targetDescription, offsetValue, offsetSlider,
                           &usesBRegister]() {
         ritTarget->setChecked(!adjustXit);
         xitTarget->setChecked(adjustXit);
@@ -6168,6 +6316,9 @@ void MainWindow::showRitXitAdjustment(bool preferXit) {
         offsetValue->setText(QString("%1%2 kHz")
                                  .arg(offset >= 0 ? "+" : "")
                                  .arg(offset / 1000.0, 0, 'f', 2));
+        offsetSlider->blockSignals(true);
+        offsetSlider->setValue(qBound(offsetSlider->minimum(), offset, offsetSlider->maximum()));
+        offsetSlider->blockSignals(false);
     };
     connect(ritTarget, &QPushButton::clicked, &dialog, [&adjustXit, &refreshTarget]() {
         adjustXit = false;
@@ -6224,6 +6375,18 @@ void MainWindow::showRitXitAdjustment(bool preferXit) {
     };
     connect(down, &QPushButton::clicked, &dialog, [&sendJog]() { sendJog(false); });
     connect(up, &QPushButton::clicked, &dialog, [&sendJog]() { sendJog(true); });
+
+    // Slider sets the offset absolutely on the selected register (10 Hz grid).
+    connect(offsetSlider, &QSlider::valueChanged, &dialog, [this, &usesBRegister](int value) {
+        const int v = (value / 10) * 10;
+        const bool registerB = usesBRegister();
+        const QString cmd = QString("%1%2%3;")
+                                .arg(registerB ? "RO$" : "RO")
+                                .arg(v >= 0 ? "+" : "-")
+                                .arg(qAbs(v), 4, 10, QChar('0'));
+        m_tcpClient->sendCAT(cmd);
+        m_radioState->parseCATCommand(cmd);
+    });
 
     auto querySelectedOffset = [this, &usesBRegister]() {
         m_tcpClient->sendCAT(usesBRegister() ? "RO$;" : "RO;");
@@ -6763,6 +6926,21 @@ bool MainWindow::eventFilter(QObject *watched, QEvent *event) {
     // short tap toggles while a long press opens the offset jog control.
     if (watched == m_ritXitBox || watched == m_ritLabel || watched == m_xitLabel
         || watched == m_ritXitValueLabel) {
+        // iPad (touch, no wheel): tap the box to open the offset adjuster.
+        // RIT/XIT on/off toggling lives on the right panel's RIT/XIT buttons.
+        if (!K4Styles::isCompactLayout() && event->type() == QEvent::MouseButtonPress) {
+            auto *mouseEvent = static_cast<QMouseEvent *>(event);
+            if (mouseEvent->button() == Qt::LeftButton) {
+                const bool ritActive =
+                    m_radioState->bSetEnabled() ? m_radioState->ritEnabledB() : m_radioState->ritEnabled();
+                const bool preferXit = (watched == m_xitLabel) || (m_radioState->xitEnabled() && !ritActive);
+                if ((preferXit && m_radioState->xitEnabled()) || (!preferXit && ritActive))
+                    showRitXitAdjustment(preferXit);
+                else
+                    showControlFeedback("Enable RIT or XIT before adjusting");
+                return true;
+            }
+        }
         if (K4Styles::isCompactLayout() && event->type() == QEvent::MouseButtonPress) {
             auto *mouseEvent = static_cast<QMouseEvent *>(event);
             if (mouseEvent->button() == Qt::LeftButton) {
@@ -6887,18 +7065,19 @@ void MainWindow::keyPressEvent(QKeyEvent *event) {
 
 void MainWindow::setPanadapterMode(PanadapterMode mode) {
     m_panadapterMode = mode;
+    // Show/hide the bordered frames (the panadapters stay shown inside them).
     switch (mode) {
     case PanadapterMode::MainOnly:
-        m_panadapterA->show();
-        m_panadapterB->hide();
+        m_panAFrame->show();
+        m_panBFrame->hide();
         break;
     case PanadapterMode::Dual:
-        m_panadapterA->show();
-        m_panadapterB->show();
+        m_panAFrame->show();
+        m_panBFrame->show();
         break;
     case PanadapterMode::SubOnly:
-        m_panadapterA->hide();
-        m_panadapterB->show();
+        m_panAFrame->hide();
+        m_panBFrame->show();
         break;
     }
 }

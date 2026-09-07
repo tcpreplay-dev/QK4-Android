@@ -40,6 +40,10 @@ protected:
 
 private:
     void drawBandwidthShape(QPainter &painter, int lineY, int lineWidth);
+    // Mode's nominal (NORM) bandwidth in Hz, or 0 if unknown.
+    int normBandwidthHz() const;
+    // Down-turned yellow ticks at the shape's base edges when at NORM.
+    void drawNormEdgeMarks(QPainter &painter, float leftX, float rightX, float bottomY);
 
     int m_filterPosition = 2;
     int m_bandwidthHz = 2400;    // Current bandwidth in Hz

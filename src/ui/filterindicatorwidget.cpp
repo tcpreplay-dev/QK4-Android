@@ -140,6 +140,34 @@ void FilterIndicatorWidget::drawBandwidthShape(QPainter &painter, int lineY, int
     float bottomY = lineY - gapAboveLine;
     float topY = bottomY - shapeHeight;
 
+    // FSK/AFSK: the K4 draws the same passband trapezoid as other modes but
+    // with a notch in the top edge, so the mark/space tones show as two peaks
+    // at the top corners. At the narrow end it collapses to a single triangle;
+    // as BW widens the top spreads into a plateau with two corner peaks. Drawn
+    // centred (the pair straddles the passband centre), matching the radio.
+    if (m_mode.startsWith(QLatin1String("FSK")) || m_mode.startsWith(QLatin1String("AFSK"))) {
+        const float fcx = width() / 2.0f;
+        const float bl = fcx - baseWidth / 2.0f;
+        const float br = fcx + baseWidth / 2.0f;
+        const float tl = fcx - topWidth / 2.0f;
+        const float tr = fcx + topWidth / 2.0f;
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(m_shapeColor);
+        QPolygonF shape;
+        if (topWidth < 6.0f) {
+            // Narrow: a single triangle (mark/space unresolved).
+            shape << QPointF(bl, bottomY) << QPointF(fcx, topY) << QPointF(br, bottomY);
+        } else {
+            // Two peaks at the top corners with a shallow central valley.
+            const float valleyY = topY + shapeHeight * 0.30f;
+            shape << QPointF(bl, bottomY) << QPointF(tl, topY) << QPointF(fcx, valleyY)
+                  << QPointF(tr, topY) << QPointF(br, bottomY);
+        }
+        painter.drawPolygon(shape);
+        drawNormEdgeMarks(painter, bl, br, bottomY);
+        return;
+    }
+
     float bottomLeft = centerX - baseWidth / 2.0f;
     float bottomRight = centerX + baseWidth / 2.0f;
     float topLeft = centerX - topWidth / 2.0f;
@@ -160,6 +188,33 @@ void FilterIndicatorWidget::drawBandwidthShape(QPainter &painter, int lineY, int
     painter.setPen(Qt::NoPen);
     painter.setBrush(m_shapeColor);
     painter.drawPolygon(shape);
+
+    drawNormEdgeMarks(painter, bottomLeft, bottomRight, bottomY);
+}
+
+int FilterIndicatorWidget::normBandwidthHz() const {
+    if (m_mode.startsWith(QLatin1String("FSK")) || m_mode.startsWith(QLatin1String("AFSK")))
+        return 300; // confirmed against the radio
+    if (m_mode == "CW" || m_mode == "CW-R")
+        return 400;
+    if (m_mode == "AM")
+        return 6000;
+    if (m_mode == "FM" || m_mode.startsWith(QLatin1String("PSK")))
+        return 0; // no NORM marker
+    return 2700; // SSB / DATA nominal
+}
+
+void FilterIndicatorWidget::drawNormEdgeMarks(QPainter &painter, float leftX, float rightX, float bottomY) {
+    const int norm = normBandwidthHz();
+    if (norm <= 0 || qAbs(m_bandwidthHz - norm) > 25)
+        return;
+    // Short down-turned yellow ticks at each base edge, marking the NORM
+    // (nominal) filter width, like the radio.
+    painter.setBrush(Qt::NoBrush);
+    painter.setPen(QPen(QColor(0xFF, 0xB0, 0x00), 2)); // amber/yellow
+    const float len = 4.0f;
+    painter.drawLine(QPointF(leftX, bottomY), QPointF(leftX - len, bottomY + len));
+    painter.drawLine(QPointF(rightX, bottomY), QPointF(rightX + len, bottomY + len));
 }
 
 void FilterIndicatorWidget::paintEvent(QPaintEvent *) {

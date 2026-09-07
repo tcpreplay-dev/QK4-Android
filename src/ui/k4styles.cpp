@@ -51,6 +51,7 @@ void applyDefaultDimensions() {
     VfoSquareSize = 45;
     NavButtonWidth = 54;
     SidePanelWidth = 105;
+    RightSidePanelWidth = 130;
     MemoryButtonWidth = 42;
 
     CenterPanelWidth = 330;
@@ -133,6 +134,7 @@ void applyCompactDimensions() {
     // Original QK4 control banks are now presented side-by-side in the
     // phone Controls screen, so each needs room for its two-column grid.
     SidePanelWidth = 170;
+    RightSidePanelWidth = 170;
     MemoryButtonWidth = 34;
 
     // 62 px filter shapes on both sides plus the 80 px RIT/XIT readout.

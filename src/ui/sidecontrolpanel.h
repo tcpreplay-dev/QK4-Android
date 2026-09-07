@@ -8,6 +8,7 @@
 #include <QTimer>
 
 class DualControlButton;
+class AdjustOverlay;
 class QGridLayout;
 class QScrollArea;
 
@@ -166,6 +167,7 @@ private:
     void setupUi();
     void triggerSecondary(QObject *watched);
     void configureAdjustmentSlider(DualControlButton *button, QSlider *slider);
+    void openAdjustOverlay(DualControlButton *button);
     void setSliderValueFromTouchPosition(QSlider *slider, int xPosition);
     QScrollArea *containingScrollArea() const;
     void setGroup1Active(DualControlButton *activeBtn);
@@ -203,6 +205,11 @@ private:
     QSlider *m_shiftSlider = nullptr;
     QSlider *m_mainRfSlider = nullptr;
     QSlider *m_subSqlSlider = nullptr;
+
+    // iPad touch adjust popup (shared, one at a time). m_adjustButton is the
+    // control whose value the popup slider currently drives.
+    AdjustOverlay *m_adjustOverlay = nullptr;
+    DualControlButton *m_adjustButton = nullptr;
 
     int m_wpmValue = 20;
     int m_pitchValue = 600;
@@ -257,8 +264,8 @@ private:
     QLabel *m_volumeLabel;
     QSlider *m_subVolumeSlider;
     QLabel *m_subVolumeLabel;
-    QSlider *m_phoneMicGainSlider;
-    QLabel *m_phoneMicGainLabel;
+    QSlider *m_phoneMicGainSlider = nullptr;
+    QLabel *m_phoneMicGainLabel = nullptr;
 
     // NORM stays with filter controls. K4 MON and BAL are intentionally
     // omitted from the remote UI; A AF and B AF provide independent levels.
