@@ -4,6 +4,8 @@
 #include <QPolygonF>
 #include <algorithm>
 
+QHash<QString, int> FilterIndicatorWidget::s_normByMode;
+
 FilterIndicatorWidget::FilterIndicatorWidget(QWidget *parent) : QWidget(parent) {
     setFixedSize(62, 62); // 50 * 1.25 = 62
 }
@@ -48,6 +50,13 @@ void FilterIndicatorWidget::setBandwidthRange(int minHz, int maxHz) {
 void FilterIndicatorWidget::setShapeColor(const QColor &fill, const QColor &outline) {
     m_shapeColor = fill;
     m_shapeOutline = outline;
+    update();
+}
+
+void FilterIndicatorWidget::setNormBandwidth(int hz) {
+    if (hz <= 0)
+        return;
+    s_normByMode.insert(m_mode, hz);
     update();
 }
 
@@ -164,7 +173,7 @@ void FilterIndicatorWidget::drawBandwidthShape(QPainter &painter, int lineY, int
                   << QPointF(tr, topY) << QPointF(br, bottomY);
         }
         painter.drawPolygon(shape);
-        drawNormEdgeMarks(painter, bl, br, bottomY);
+        drawFilterBaseline(painter, bl, br, lineY);
         return;
     }
 
@@ -189,32 +198,58 @@ void FilterIndicatorWidget::drawBandwidthShape(QPainter &painter, int lineY, int
     painter.setBrush(m_shapeColor);
     painter.drawPolygon(shape);
 
-    drawNormEdgeMarks(painter, bottomLeft, bottomRight, bottomY);
+    drawFilterBaseline(painter, bottomLeft, bottomRight, lineY);
 }
 
 int FilterIndicatorWidget::normBandwidthHz() const {
+    // The nominal width learned when the operator last pressed NORM in this
+    // mode is authoritative; the per-mode guesses below are only a fallback
+    // for a mode NORM has not been pressed in yet this session.
+    auto it = s_normByMode.constFind(m_mode);
+    if (it != s_normByMode.constEnd())
+        return it.value();
+    if (m_mode == "FM" || m_mode.startsWith(QLatin1String("PSK")))
+        return 0; // no NORM marker
     if (m_mode.startsWith(QLatin1String("FSK")) || m_mode.startsWith(QLatin1String("AFSK")))
-        return 300; // confirmed against the radio
+        return 300;
     if (m_mode == "CW" || m_mode == "CW-R")
         return 400;
     if (m_mode == "AM")
         return 6000;
-    if (m_mode == "FM" || m_mode.startsWith(QLatin1String("PSK")))
-        return 0; // no NORM marker
     return 2700; // SSB / DATA nominal
 }
 
-void FilterIndicatorWidget::drawNormEdgeMarks(QPainter &painter, float leftX, float rightX, float bottomY) {
-    const int norm = normBandwidthHz();
-    if (norm <= 0 || qAbs(m_bandwidthHz - norm) > 25)
-        return;
-    // Short down-turned yellow ticks at each base edge, marking the NORM
-    // (nominal) filter width, like the radio.
+void FilterIndicatorWidget::drawFilterBaseline(QPainter &painter, float leftX, float rightX, float lineY) {
+    // The K4 draws a fixed-length yellow reference line, the same for every
+    // mode (the coloured filter shape varies, this line does not). Centre it
+    // under the current shape and give it a constant half-width.
+    const float cx = (leftX + rightX) / 2.0f;
+    const float half = 22.0f; // fixed: CW and LSB lines are identical length
+    const float lx = cx - half;
+    const float rx = cx + half;
+
     painter.setBrush(Qt::NoBrush);
-    painter.setPen(QPen(QColor(0xFF, 0xB0, 0x00), 2)); // amber/yellow
-    const float len = 4.0f;
-    painter.drawLine(QPointF(leftX, bottomY), QPointF(leftX - len, bottomY + len));
-    painter.drawLine(QPointF(rightX, bottomY), QPointF(rightX + len, bottomY + len));
+    QPen pen(m_lineColor, 2);
+    pen.setJoinStyle(Qt::RoundJoin); // clean corner, no miter spike above the flat
+    painter.setPen(pen);
+
+    // Only when the passband is exactly at the mode's NORM width do the two
+    // ends turn downward. Draw the flat top and both legs as one polyline so
+    // the corners join cleanly and the legs never rise above the flat line.
+    const int norm = normBandwidthHz();
+    if (norm > 0 && m_bandwidthHz == norm) {
+        const float len = 5.0f;
+        const float out = 2.0f;
+        const QPointF pts[4] = {
+            QPointF(lx - out, lineY + len),
+            QPointF(lx, lineY),
+            QPointF(rx, lineY),
+            QPointF(rx + out, lineY + len),
+        };
+        painter.drawPolyline(pts, 4);
+    } else {
+        painter.drawLine(QPointF(lx, lineY), QPointF(rx, lineY));
+    }
 }
 
 void FilterIndicatorWidget::paintEvent(QPaintEvent *) {
@@ -227,18 +262,11 @@ void FilterIndicatorWidget::paintEvent(QPaintEvent *) {
     // Line parameters
     // Preserve breathing room above the phone's always-visible antenna row.
     int lineY = K4Styles::isCompactLayout() ? 36 : 40;
-    int lineHeight = 3;
     int lineWidth = 58; // 38 + 20 (10px wider on each side)
-    int lineX = (w - lineWidth) / 2;
 
-    // Draw bandwidth shape above the line
+    // Draw bandwidth shape; the yellow passband line (and NORM ends) are drawn
+    // with it so the line width matches the current filter.
     drawBandwidthShape(painter, lineY, lineWidth);
-
-    // Draw horizontal line
-    QRectF lineRect(lineX, lineY, lineWidth, lineHeight);
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(m_lineColor);
-    painter.drawRect(lineRect);
 
     // FIL text below line
     QFont textFont = font();
@@ -248,7 +276,7 @@ void FilterIndicatorWidget::paintEvent(QPaintEvent *) {
     painter.setPen(m_textColor);
 
     QString text = QString("FIL%1").arg(m_filterPosition);
-    int textY = lineY + lineHeight + 2;
+    int textY = lineY + 3 + 2; // 3 = passband line thickness (see drawFilterBaseline)
     QRectF textRect(0, textY, w, h - textY);
     painter.drawText(textRect, Qt::AlignHCenter | Qt::AlignTop, text);
 }

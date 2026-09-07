@@ -1,6 +1,8 @@
 #include "sidecontrolpanel.h"
 #include "dualcontrolbutton.h"
 #include "adjustoverlay.h"
+#include "monoverlay.h"
+#include "baloverlay.h"
 #include "duallinepanelbutton.h"
 #include "k4styles.h"
 #include "../settings/radiosettings.h"
@@ -248,6 +250,36 @@ void SideControlPanel::setupUi() {
     // ===== Spacing after TX buttons =====
     layout->addSpacing(K4Styles::Dimensions::PaddingLarge);
 
+    // MON / NORM / BAL each sit under the control pair they act on, matching
+    // the K4 front panel. Full-width so they never crowd each other; taller on
+    // the iPad for touch, compact-mini on the phone.
+    const int swBtnHeight = K4Styles::isCompactLayout() ? K4Styles::Dimensions::ButtonHeightMini
+                                                        : K4Styles::Dimensions::ButtonHeightSmall;
+    auto addSwButton = [this, layout, swBtnHeight](QPushButton *&btn, const QString &text) {
+        btn = new QPushButton(text, this);
+        btn->setFixedHeight(swBtnHeight);
+        btn->setStyleSheet(K4Styles::compactButton());
+        if (K4Styles::isCompactLayout()) {
+            layout->addWidget(btn);
+        } else {
+            // Align the button's visible box with the DualControlButton tiles
+            // above. Their painted box is inset inside the 90px widget by
+            // barWidth(5)+margin(1)+2 on the left and margin(1) on the right
+            // (see DualControlButton::paintEvent); a plain button paints to its
+            // own edge, so inset it by the same amounts to line the boxes up.
+            constexpr int tileBoxLeft = 5 + 1 + 2;
+            const int tileBoxWidth = K4Styles::Dimensions::MenuBarButtonWidth - tileBoxLeft - 1;
+            btn->setFixedWidth(tileBoxWidth);
+            auto *row = new QWidget(this);
+            auto *rowLayout = new QHBoxLayout(row);
+            rowLayout->setContentsMargins(tileBoxLeft, 0, 0, 0);
+            rowLayout->setSpacing(0);
+            rowLayout->addWidget(btn);
+            rowLayout->addStretch(1);
+            layout->addWidget(row);
+        }
+    };
+
     // ===== Group 1: Global (CW/Power) - Orange bar =====
     m_wpmBtn = new DualControlButton(this);
     m_wpmBtn->setPrimaryLabel("WPM");
@@ -266,6 +298,10 @@ void SideControlPanel::setupUi() {
     m_pwrBtn->setContext(DualControlButton::Global);
     m_pwrBtn->setShowIndicator(false); // Second button starts inactive
     addAdjustmentRow(m_pwrBtn, m_pwrSlider, K4Styles::Colors::AccentAmber);
+
+    // MON: monitor level, under the WPM/PWR (MIC/PWR/CMP/DLY) group.
+    addSwButton(m_monBtn, QStringLiteral("MON"));
+    m_monBtn->setToolTip(QStringLiteral("Monitor (sidetone / TX audio) level"));
 
     // ===== Spacing between groups =====
     layout->addSpacing(K4Styles::Dimensions::PaddingLarge);
@@ -289,15 +325,10 @@ void SideControlPanel::setupUi() {
     m_shiftBtn->setShowIndicator(false); // Second button starts inactive
     addAdjustmentRow(m_shiftBtn, m_shiftSlider, K4Styles::Colors::VfoACyan);
 
-    // NORM affects only the filter passband, so keep it in the filter group.
-    m_normBtn = new QPushButton(QStringLiteral("NORM"), this);
-    m_normBtn->setFixedHeight(32);
-    m_normBtn->setStyleSheet(K4Styles::compactButton());
+    // NORM: normalize the filter passband, under the BW/SHFT (HI/LO) group.
+    addSwButton(m_normBtn, QStringLiteral("NORM"));
     m_normBtn->setAccessibleName(QStringLiteral("Normalize receive filter passband"));
     m_normBtn->setToolTip(QStringLiteral("Restore the current mode's nominal filter passband"));
-    m_normBtn->installEventFilter(this);
-    layout->addWidget(m_normBtn);
-    connect(m_normBtn, &QPushButton::clicked, this, &SideControlPanel::normalizeFilterRequested);
 
     // ===== Spacing between groups =====
     layout->addSpacing(K4Styles::Dimensions::PaddingLarge);
@@ -320,6 +351,35 @@ void SideControlPanel::setupUi() {
     m_subSqlBtn->setContext(DualControlButton::SubRx);
     m_subSqlBtn->setShowIndicator(false); // Second button starts inactive
     addAdjustmentRow(m_subSqlBtn, m_subSqlSlider, K4Styles::Colors::VfoBGreen);
+
+    // BAL: sub-RX audio balance, under the M.RF/S.SQL (M.SQL/S.RF) group.
+    addSwButton(m_balBtn, QStringLiteral("BAL"));
+    m_balBtn->setToolTip(QStringLiteral("Sub-RX audio balance"));
+
+    // Overlays cover their control groups; construct after all groups exist so
+    // raise() in showOverGroup lands them on top.
+    m_monOverlay = new MonOverlay(this);
+    m_balOverlay = new BalOverlay(this);
+
+    connect(m_normBtn, &QPushButton::clicked, this, &SideControlPanel::normalizeFilterRequested);
+    connect(m_monBtn, &QPushButton::clicked, this, [this]() {
+        emit monClicked();
+        if (m_monOverlay->isVisible())
+            m_monOverlay->hide();
+        else
+            m_monOverlay->showOverGroup(m_wpmBtn, m_pwrBtn);
+    });
+    connect(m_balBtn, &QPushButton::clicked, this, [this]() {
+        emit balClicked();
+        if (m_balOverlay->isVisible())
+            m_balOverlay->hide();
+        else
+            m_balOverlay->showOverGroup(m_mainRfBtn, m_subSqlBtn);
+    });
+    connect(m_monOverlay, &MonOverlay::levelChangeRequested,
+            this, &SideControlPanel::monLevelChangeRequested);
+    connect(m_balOverlay, &BalOverlay::balanceChangeRequested,
+            this, &SideControlPanel::balChangeRequested);
 
     // Regular (iPad): MAIN/SUB volumes and PHONE MIC sit at the bottom of the
     // column, as on QK4 for macOS, instead of leading it.
@@ -1184,4 +1244,19 @@ void SideControlPanel::triggerSecondary(QObject *watched) {
     else if (watched == m_voxBtn) emit qskClicked();
     else if (watched == m_antBtn) emit remAntClicked();
     else if (watched == m_rxAntBtn) emit subAntClicked();
+}
+
+void SideControlPanel::updateMonitorLevel(int mode, int level) {
+    if (m_monOverlay && m_monOverlay->mode() == mode)
+        m_monOverlay->setValue(level);
+}
+
+void SideControlPanel::updateMonitorMode(int mode) {
+    if (m_monOverlay)
+        m_monOverlay->setMode(mode);
+}
+
+void SideControlPanel::updateBalance(int mode, int offset) {
+    if (m_balOverlay)
+        m_balOverlay->setBalance(mode, offset);
 }

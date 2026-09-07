@@ -2959,7 +2959,10 @@ void MainWindow::setupUi() {
     // Right Side Panel (mirrors left panel dimensions)
     m_rightPanelScroll = new QScrollArea(middleWidget);
     m_rightPanelScroll->setFrameShape(QFrame::NoFrame);
-    m_rightPanelScroll->setWidgetResizable(false);
+    // iPad: let the panel fill the viewport height so its trailing addStretch
+    // can bottom-anchor the fine-tune pad near the PTT button, while a taller
+    // panel still scrolls (minimumHeight below). Phone keeps manual sizing.
+    m_rightPanelScroll->setWidgetResizable(!K4Styles::isCompactLayout());
     m_rightPanelScroll->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     m_rightPanelScroll->setVerticalScrollBarPolicy(K4Styles::isCompactLayout() ? Qt::ScrollBarAlwaysOn
                                                                                 : Qt::ScrollBarAlwaysOff);
@@ -2976,6 +2979,10 @@ void MainWindow::setupUi() {
     if (K4Styles::isCompactLayout()) {
         m_rightPanelScroll->hide();
     } else {
+        // Floor the panel at its natural height: when the viewport is taller,
+        // widgetResizable stretches it and the addStretch anchors the pad to
+        // the bottom; when shorter, it keeps full height and scrolls.
+        m_rightSidePanel->setMinimumHeight(m_rightSidePanel->sizeHint().height());
         middleLayout->addWidget(m_rightPanelScroll);
     }
 
@@ -3718,12 +3725,58 @@ void MainWindow::setupUi() {
         m_tcpClient->sendCAT("SW157;");
     });
 
-    // NORM is placed with BW/SHFT and performs the K4's nominal-passband
-    // action. K4 MON is intentionally not exposed in the remote control UI.
+    // NORM performs the K4's nominal-passband action. After the radio settles
+    // to its nominal width, learn that width for the active RX's current mode
+    // so the filter indicator's NORM edge ticks show at the true nominal
+    // rather than a hardcoded guess.
     connect(m_sideControlPanel, &SideControlPanel::normalizeFilterRequested, this, [this]() {
         queueControlFeedback("FILTER_NORM", "Filter passband normalized");
         m_tcpClient->sendCAT("SW129;");
+        QTimer::singleShot(300, this, [this]() {
+            if (m_radioState->bSetEnabled())
+                m_filterBWidget->setNormBandwidth(m_radioState->filterBandwidthB());
+            else
+                m_filterAWidget->setNormBandwidth(m_radioState->filterBandwidth());
+        });
     });
+    // MON / BAL toggle their K4 functions; the overlays adjust ML / BL levels.
+    connect(m_sideControlPanel, &SideControlPanel::monClicked, this, [this]() {
+        queueControlFeedback("MON", "Monitor toggled");
+        m_tcpClient->sendCAT("SW128;");
+    });
+    connect(m_sideControlPanel, &SideControlPanel::balClicked, this, [this]() {
+        queueControlFeedback("BAL", "Sub-RX balance toggled");
+        m_tcpClient->sendCAT("SW130;");
+    });
+    connect(m_sideControlPanel, &SideControlPanel::monLevelChangeRequested, this,
+            [this](int mode, int level) {
+        m_tcpClient->sendCAT(QString("ML%1%2;").arg(mode).arg(level, 3, 10, QChar('0')));
+        m_radioState->setMonitorLevel(mode, level);
+    });
+    connect(m_sideControlPanel, &SideControlPanel::balChangeRequested, this,
+            [this](int mode, int offset) {
+        const QString sign = offset >= 0 ? "+" : "-";
+        m_tcpClient->sendCAT(QString("BL%1%2%3;")
+                                 .arg(mode)
+                                 .arg(sign)
+                                 .arg(qAbs(offset), 2, 10, QChar('0')));
+        m_radioState->setBalance(mode, offset);
+    });
+    connect(m_radioState, &RadioState::monitorLevelChanged,
+            m_sideControlPanel, &SideControlPanel::updateMonitorLevel);
+    connect(m_radioState, &RadioState::balanceChanged,
+            m_sideControlPanel, &SideControlPanel::updateBalance);
+    // Keep the MON overlay pointed at the right ML register as the mode changes.
+    auto updateMonitorMode = [this](RadioState::Mode mode) {
+        int monMode = 2; // Voice
+        if (mode == RadioState::CW || mode == RadioState::CW_R)
+            monMode = 0;
+        else if (mode == RadioState::DATA || mode == RadioState::DATA_R)
+            monMode = 1;
+        m_sideControlPanel->updateMonitorMode(monMode);
+    };
+    connect(m_radioState, &RadioState::modeChanged, this, updateMonitorMode);
+    updateMonitorMode(m_radioState->mode()); // seed initial monitor mode
 
     // Forward audio mix routing (MX command) to audio engine
     connect(m_radioState, &RadioState::audioMixChanged, this, [this](int left, int right) {
