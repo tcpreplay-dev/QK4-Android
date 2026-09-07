@@ -59,7 +59,8 @@ private:
     void destroyAudio();
     bool ensureAudioReady();
     void playElement(int durationMs);
-    void playStraightKeyChunk(int durationMs, bool fadeIn, bool fadeOut);
+    void refillStraightKeyBuffer();
+    qint64 writeStraightKeyFrames(int frameCount, bool fadeIn, bool fadeOut);
     int ditDurationMs() const;
     int dahDurationMs() const;
 
@@ -86,6 +87,9 @@ private:
     double m_phase = 0.0;
     Element m_currentElement = ElementNone;
     bool m_straightKeyDown = false;
+    qint64 m_straightProcessedBaseUs = 0;
+    qint64 m_straightQueuedFrames = 0;
+    bool m_straightNeedsFadeIn = true;
 };
 
 #endif // SIDETONEGENERATOR_H

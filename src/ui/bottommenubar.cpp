@@ -8,7 +8,34 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QSizePolicy>
+#include <QIcon>
 #include <cmath>
+
+namespace {
+// Draw a monochrome gear onto a settings button so no platform can substitute
+// a colored emoji glyph. Shared by the compact and regular layouts.
+void applyGearIcon(QPushButton *button) {
+    QPixmap gearPixmap(16, 16);
+    gearPixmap.fill(Qt::transparent);
+    QPainter gearPainter(&gearPixmap);
+    gearPainter.setRenderHint(QPainter::Antialiasing);
+    gearPainter.setPen(QPen(Qt::white, 2.0, Qt::SolidLine, Qt::RoundCap));
+    const QPointF center(8.0, 8.0);
+    constexpr qreal Pi = 3.14159265358979323846;
+    for (int i = 0; i < 8; ++i) {
+        const qreal angle = i * Pi / 4.0;
+        gearPainter.drawLine(center + QPointF(std::cos(angle) * 4.0, std::sin(angle) * 4.0),
+                             center + QPointF(std::cos(angle) * 6.5, std::sin(angle) * 6.5));
+    }
+    gearPainter.drawEllipse(center, 4.0, 4.0);
+    gearPainter.drawEllipse(center, 1.5, 1.5);
+    gearPainter.end();
+    button->setAccessibleName("QK4 Settings");
+    button->setToolTip("QK4 Settings");
+    button->setIcon(QIcon(gearPixmap));
+    button->setIconSize(QSize(16, 16));
+}
+} // namespace
 
 BottomMenuBar::BottomMenuBar(QWidget *parent) : QWidget(parent) {
     setupUi();
@@ -74,27 +101,8 @@ void BottomMenuBar::setupUi() {
             button->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
         }
         m_settingsBtn = createMenuButton(QString());
-        m_settingsBtn->setAccessibleName("QK4 Settings");
-        m_settingsBtn->setToolTip("QK4 Settings");
         m_settingsBtn->setFixedSize(34, 26);
-        // Draw a monochrome gear so Android cannot substitute a colored emoji.
-        QPixmap gearPixmap(16, 16);
-        gearPixmap.fill(Qt::transparent);
-        QPainter gearPainter(&gearPixmap);
-        gearPainter.setRenderHint(QPainter::Antialiasing);
-        gearPainter.setPen(QPen(Qt::white, 2.0, Qt::SolidLine, Qt::RoundCap));
-        const QPointF center(8.0, 8.0);
-        constexpr qreal Pi = 3.14159265358979323846;
-        for (int i = 0; i < 8; ++i) {
-            const qreal angle = i * Pi / 4.0;
-            gearPainter.drawLine(center + QPointF(std::cos(angle) * 4.0, std::sin(angle) * 4.0),
-                                 center + QPointF(std::cos(angle) * 6.5, std::sin(angle) * 6.5));
-        }
-        gearPainter.drawEllipse(center, 4.0, 4.0);
-        gearPainter.drawEllipse(center, 1.5, 1.5);
-        gearPainter.end();
-        m_settingsBtn->setIcon(QIcon(gearPixmap));
-        m_settingsBtn->setIconSize(QSize(16, 16));
+        applyGearIcon(m_settingsBtn);
         tuneRow->addWidget(m_settingsBtn);
         tuneRow->addWidget(m_tuneADownBtn);
         tuneRow->addWidget(m_tuneAUpBtn);
@@ -125,6 +133,14 @@ void BottomMenuBar::setupUi() {
     layout->setContentsMargins(sidePanelInset, K4Styles::Dimensions::PaddingSmall, K4Styles::Dimensions::PaddingMedium,
                                K4Styles::Dimensions::PaddingSmall);
     layout->setSpacing(K4Styles::Dimensions::PopupButtonSpacing);
+
+    // Connect and Settings at far left (desktop/macOS parity). On iOS these are
+    // the only connect/settings entry points, since the menu bar is hidden.
+    m_connectBtn = createMenuButton("CONN");
+    layout->addWidget(m_connectBtn);
+    m_settingsBtn = createMenuButton(QString());
+    applyGearIcon(m_settingsBtn);
+    layout->addWidget(m_settingsBtn);
 
     // Add stretch before buttons to center them
     layout->addStretch();
@@ -323,7 +339,9 @@ void BottomMenuBar::setPttActive(bool active) {
     } else {
         m_pttLocked = false;
         m_pttLockTimer->stop();
-        m_pttBtn->setText("TX / RX");
+        // Compact keeps the phone's "TX / RX" latch label; the regular/iPad
+        // layout returns to "PTT" to match QK4 on macOS and the radio.
+        m_pttBtn->setText(K4Styles::isCompactLayout() ? "TX / RX" : "PTT");
         m_pttBtn->setStyleSheet(K4Styles::menuBarButton());
     }
 }

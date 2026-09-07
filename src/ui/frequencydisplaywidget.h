@@ -58,6 +58,16 @@ public:
     // Check if currently in edit mode
     bool isEditing() const;
 
+    // Enter the blue frequency edit field (FREQ ENT button / radio-style),
+    // as opposed to tapping a digit which selects the tuning rate.
+    void beginEdit();
+    // Commit the edit field (send) / cancel it (restore).
+    void commitEdit();
+    void cancelEdit();
+    // Adjust the digit under the cursor by delta (+/-1), carrying across
+    // digits, for touch entry via +/- controls while the field is open.
+    void nudgeCursorDigit(int delta);
+
 signals:
     // Emitted when user presses Enter to confirm frequency entry
     // digits is the frequency as plain digits (e.g., "7024980")

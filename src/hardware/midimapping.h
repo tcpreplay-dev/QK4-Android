@@ -3,12 +3,13 @@
 
 #include <QJsonObject>
 #include <QMap>
+#include <QPair>
 #include <QString>
 #include <QVector>
 
 namespace MidiMapping {
 
-constexpr int FileVersion = 1;
+constexpr int FileVersion = 2;
 
 enum class Profile {
     TinyMidi = 0,
@@ -84,11 +85,15 @@ struct DeviceMapping {
 
 DeviceMapping ctr2Default();
 DeviceMapping ctr2ExtendedDefault();
+DeviceMapping withCtr2ButtonMode(const DeviceMapping &mapping, bool extendedButtons);
 DeviceMapping tinyMidiDefault();
 DeviceMapping haliKeyDefault();
 
 QString knobActionLabel(const QString &action);
 QString buttonActionLabel(const QString &action);
+QVector<int> ctr2ButtonNotes(bool extendedButtons);
+QString ctr2ButtonLabel(bool extendedButtons, int note);
+QPair<int, int> ctr2KnobButtonNotes(bool extendedButtons, int cc);
 QString knobOutputLabel(KnobOutput output);
 QString knobOutputId(KnobOutput output);
 QString knobOutputDescription(KnobOutput output);

@@ -78,6 +78,8 @@ void VFOWidget::setupUi() {
     // Meter fills full width of normal content (both are 200px)
     m_txMeter = new TxMeterWidget(m_normalContent);
     m_txMeter->setFixedWidth(K4Styles::Dimensions::VfoMeterWidth);
+    m_txMeter->setSMeterColor(
+        QColor(m_type == VFO_A ? K4Styles::Colors::VfoACyan : K4Styles::Colors::VfoBGreen));
     normalLayout->addWidget(m_txMeter);
 
     // Row 3: AGC, PRE, ATT, NB, NR labels (aligned with meter)

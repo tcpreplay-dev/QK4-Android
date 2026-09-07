@@ -100,7 +100,8 @@ OptionsDialog::~OptionsDialog() {
 
 void OptionsDialog::setupUi() {
     setWindowTitle("Options");
-#ifdef Q_OS_ANDROID
+    // Touch platforms show this as an in-window overlay sized to the console.
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     setMinimumSize(0, 0);
 #else
     setMinimumSize(700, 550);
@@ -120,7 +121,10 @@ void OptionsDialog::setupUi() {
                       .arg(K4Styles::Dimensions::FontSizePopup)
                       .arg(K4Styles::Colors::GradientBottom));
 
-#ifdef Q_OS_ANDROID
+    // Touch platforms have no native window chrome, so provide an in-dialog
+    // header with a "RETURN TO OPERATE" button; the desktop uses the window
+    // title bar's close control instead.
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     auto *outerLayout = new QVBoxLayout(this);
     outerLayout->setContentsMargins(6, 4, 6, 6);
     outerLayout->setSpacing(4);
@@ -128,9 +132,13 @@ void OptionsDialog::setupUi() {
     auto *title = new QLabel("QK4 SETTINGS", this);
     title->setStyleSheet(QString("color: %1; font-size: 16px; font-weight: bold;")
                              .arg(K4Styles::Colors::AccentAmber));
-    auto *close = new QPushButton("RETURN TO OPERATE", this);
-    close->setMinimumHeight(30);
-    close->setStyleSheet(K4Styles::menuBarButton());
+    // Compact return/enter key on the far right, matching the "↵" button in
+    // the in-window control dialogs (e.g. NR ADJUST) rather than a wide label.
+    auto *close = new QPushButton(QString::fromUtf8("↵"), this);
+    close->setFixedSize(48, 32);
+    close->setStyleSheet(K4Styles::menuBarButton() + "QPushButton { font-size: 20px; font-weight: bold; }");
+    close->setToolTip("Return to operate");
+    close->setAccessibleName("Return to operate");
     connect(close, &QPushButton::clicked, this, &OptionsDialog::requestReturnToOperate);
     header->addWidget(title);
     header->addStretch(1);

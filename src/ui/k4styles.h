@@ -287,7 +287,8 @@ inline int MenuBarHeight = 52;  // Bottom menu bar container height
 inline int FormLabelWidth = 80;    // Form field labels in dialogs
 inline int VfoSquareSize = 45;     // VFO A/B indicator squares and mode labels
 inline int NavButtonWidth = 54;    // Navigation buttons in overlays
-inline int SidePanelWidth = 105;   // Left and right side panels
+inline int SidePanelWidth = 105;   // Left side panel (and both panels on phone)
+inline int RightSidePanelWidth = 130; // Right side panel; wider on iPad to match macOS
 inline int MemoryButtonWidth = 42; // M1-M4, REC, STORE, RCL buttons
 
 // Main layout widths/heights

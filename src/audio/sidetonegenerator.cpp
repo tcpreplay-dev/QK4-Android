@@ -5,6 +5,7 @@
 #include <QDebug>
 #include <QTimer>
 #include <QtMath>
+#include <cmath>
 #ifdef Q_OS_ANDROID
 #include <QtMultimedia/private/qaudiodevice_p.h>
 #include <QJniObject>
@@ -82,7 +83,10 @@ SidetoneGenerator::SidetoneGenerator(QObject *parent) : QObject(parent) {
 
     m_straightKeyTimer = new QTimer(this);
     m_straightKeyTimer->setTimerType(Qt::PreciseTimer);
-    m_straightKeyTimer->setInterval(10);
+    // Refill more often than the write-ahead window. Android is not a
+    // real-time scheduler, so a timer that writes exactly one interval of
+    // sound can underrun and make a held straight-key tone sound raspy.
+    m_straightKeyTimer->setInterval(3);
     connect(m_straightKeyTimer, &QTimer::timeout,
             this, &SidetoneGenerator::onStraightKeyTimer);
 
@@ -185,6 +189,13 @@ void SidetoneGenerator::initAudio() {
         if (m_pushDevice.data() == pushDevice)
             m_pushDevice.clear();
     });
+
+    // Straight-key queue accounting is relative to the current sink. Route
+    // changes replace the sink, so the next refill begins a fresh continuous
+    // stream with a short attack instead of carrying stale timing forward.
+    m_straightProcessedBaseUs = sink->processedUSecs();
+    m_straightQueuedFrames = 0;
+    m_straightNeedsFadeIn = true;
 }
 
 void SidetoneGenerator::destroyAudio() {
@@ -324,7 +335,12 @@ void SidetoneGenerator::startStraightKey() {
     m_currentElement = ElementNone;
     m_repeatTimer->stop();
     m_straightKeyDown = true;
-    playStraightKeyChunk(10, true, false);
+    m_straightNeedsFadeIn = true;
+    if (ensureAudioReady()) {
+        m_straightProcessedBaseUs = m_audioSink->processedUSecs();
+        m_straightQueuedFrames = 0;
+        refillStraightKeyBuffer();
+    }
     m_straightKeyTimer->start();
 }
 
@@ -333,14 +349,14 @@ void SidetoneGenerator::stopStraightKey() {
         return;
     m_straightKeyDown = false;
     m_straightKeyTimer->stop();
-    // Queue only a very short fall behind the last 10 ms chunk. This keeps
-    // release latency bounded while avoiding an abrupt waveform click.
-    playStraightKeyChunk(3, false, true);
+    // The 3 ms fall follows at most 12 ms of queued tone. This retains a
+    // prompt key-up while avoiding both an abrupt click and timer underruns.
+    writeStraightKeyFrames((48000 * 3) / 1000, false, true);
 }
 
 void SidetoneGenerator::onStraightKeyTimer() {
     if (m_straightKeyDown)
-        playStraightKeyChunk(10, false, false);
+        refillStraightKeyBuffer();
 }
 
 void SidetoneGenerator::onRepeatTimer() {
@@ -421,18 +437,51 @@ void SidetoneGenerator::playElement(int durationMs) {
     }
 }
 
-void SidetoneGenerator::playStraightKeyChunk(int durationMs, bool fadeIn, bool fadeOut) {
-    if (!ensureAudioReady())
+void SidetoneGenerator::refillStraightKeyBuffer() {
+    if (!m_straightKeyDown || !ensureAudioReady())
         return;
 
+    constexpr qint64 sampleRate = 48000;
+    constexpr qint64 targetFrames = (sampleRate * 12) / 1000;
+    const qint64 processedUs = qMax<qint64>(m_straightProcessedBaseUs,
+                                            m_audioSink->processedUSecs());
+    const qint64 processedFrames =
+        ((processedUs - m_straightProcessedBaseUs) * sampleRate) / 1000000;
+
+    // If Android consumed past our last submitted frame during a scheduling
+    // pause, rebase the queue before refilling it. The attack ramp prevents a
+    // discontinuity if an underrun ever exhausts the safety window.
+    if (processedFrames >= m_straightQueuedFrames) {
+        m_straightQueuedFrames = processedFrames;
+        m_straightNeedsFadeIn = true;
+    }
+    const qint64 pendingFrames = m_straightQueuedFrames - processedFrames;
+    const int requestedFrames = static_cast<int>(qMax<qint64>(0, targetFrames - pendingFrames));
+    if (requestedFrames <= 0)
+        return;
+
+    const qint64 writtenFrames =
+        writeStraightKeyFrames(requestedFrames, m_straightNeedsFadeIn, false);
+    if (writtenFrames > 0) {
+        m_straightQueuedFrames += writtenFrames;
+        m_straightNeedsFadeIn = false;
+    }
+}
+
+qint64 SidetoneGenerator::writeStraightKeyFrames(int frameCount, bool fadeIn, bool fadeOut) {
+    if (!ensureAudioReady())
+        return 0;
+
     constexpr int sampleRate = 48000;
-    const int sampleCount = qMax(1, (sampleRate * durationMs) / 1000);
+    const int sampleCount = qMax(1, frameCount);
     const int edgeSamples = qMin(sampleCount, (sampleRate * 3) / 1000);
     QByteArray buffer(sampleCount * static_cast<int>(sizeof(qint16)), 0);
     auto *samples = reinterpret_cast<qint16 *>(buffer.data());
     const int frequency = m_frequency.load(std::memory_order_relaxed);
     const float volume = m_volume.load(std::memory_order_relaxed);
     const double phaseIncrement = 2.0 * M_PI * frequency / sampleRate;
+    const double startPhase = m_phase;
+    double phase = startPhase;
 
     for (int index = 0; index < sampleCount; ++index) {
         float envelope = 1.0f;
@@ -440,17 +489,26 @@ void SidetoneGenerator::playStraightKeyChunk(int durationMs, bool fadeIn, bool f
             envelope *= static_cast<float>(index) / qMax(1, edgeSamples - 1);
         if (fadeOut && index >= sampleCount - edgeSamples)
             envelope *= static_cast<float>(sampleCount - 1 - index) / qMax(1, edgeSamples - 1);
-        samples[index] = static_cast<qint16>(qSin(m_phase) * volume * envelope * 32767.0);
-        m_phase += phaseIncrement;
-        if (m_phase >= 2.0 * M_PI)
-            m_phase -= 2.0 * M_PI;
+        samples[index] = static_cast<qint16>(qSin(phase) * volume * envelope * 32767.0);
+        phase += phaseIncrement;
+        if (phase >= 2.0 * M_PI)
+            phase -= 2.0 * M_PI;
     }
 
     const QPointer<QIODevice> pushDevice = m_pushDevice;
     if (!pushDevice)
-        return;
-    if (pushDevice->write(buffer) < 0) {
+        return 0;
+    const qint64 writtenBytes = pushDevice->write(buffer);
+    if (writtenBytes < 0) {
         qWarning() << "SidetoneGenerator: straight-key write failed; rebuilding audio sink";
         destroyAudio();
+        return 0;
     }
+    const qint64 writtenFrames = writtenBytes / static_cast<qint64>(sizeof(qint16));
+    m_phase = std::fmod(startPhase + phaseIncrement * static_cast<double>(writtenFrames),
+                        2.0 * M_PI);
+    if (writtenBytes < buffer.size())
+        qWarning() << "SidetoneGenerator: partial straight-key write" << writtenBytes
+                   << "of" << buffer.size() << "bytes";
+    return writtenFrames;
 }

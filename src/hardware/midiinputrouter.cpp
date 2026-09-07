@@ -114,15 +114,21 @@ void MidiInputRouter::processEvent(const QString &sourceId, int status, int data
 
 void MidiInputRouter::routeNote(const QString &sourceId, const DeviceMapping &mapping,
                                 int note, bool pressed) {
-    // In CTR2 "MIDI Button" knob mode, CC 100..107 become directional
-    // NoteOn pairs 40/41 through 54/55. A configured knob pair takes
-    // precedence over the overlapping extended-button notes.
-    if (mapping.profile == Profile::Ctr2 && note >= 40 && note <= 55) {
-        const int cc = 100 + ((note - 40) / 2);
+    // In CTR2 "MIDI Button" knob mode, CC100-107 use directional NoteOn
+    // pairs 40-55 in normal BTN mode and 60-75 in Extended BTN mode. Keeping
+    // the ranges mode-specific leaves extended physical-button notes 40-48
+    // available to their assigned actions.
+    const int firstKnobButtonNote = mapping.extendedButtons ? 60 : 40;
+    const int lastKnobButtonNote = firstKnobButtonNote + 15;
+    if (mapping.profile == Profile::Ctr2
+        && note >= firstKnobButtonNote && note <= lastKnobButtonNote) {
+        const int cc = 100 + ((note - firstKnobButtonNote) / 2);
         const auto knob = mapping.knobs.constFind(cc);
         if (knob != mapping.knobs.cend() && knob->output == KnobOutput::Button) {
             if (pressed && knob->action != QStringLiteral("disabled"))
-                emit knobActionRequested(knob->action, (note % 2) == 0 ? -1 : 1, false);
+                emit knobActionRequested(knob->action,
+                                         ((note - firstKnobButtonNote) % 2) == 0 ? -1 : 1,
+                                         false);
             return;
         }
     }

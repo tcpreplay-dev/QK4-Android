@@ -1,8 +1,26 @@
 # Project status
 
-Last updated: 2026-09-03
+Last updated: 2026-09-06
 
 ## Released build
+
+**QK4 Mobile v1.0.4.1** uses Android version code 31.
+
+- Straight-key and external-keyer local sidetone now maintains a small 12 ms
+  write-ahead window, refilled every 3 ms, instead of relying on exactly one
+  10 ms audio write per 10 ms Android timer interval. This is intended to
+  eliminate audible underrun rasp while retaining a 3 ms attack/fall and a
+  bounded key-up tail. Android compilation passes; physical audio validation
+  remains required.
+- CTR2 Extended Button Mode now keeps physical-button notes 1-48 separate from
+  knob Button output. Normal knob direction pairs remain 40-55; Extended mode
+  uses 60/61 through 74/75 for CC100-107 within Lynovation's clarified 60-95
+  range. Extended paddle/straight-key notes remain 96-99. Enabling Extended
+  Button Mode carries the 12 shared assignments into Home only; the 36 newly
+  exposed Mode 1-3 assignments start disabled instead of cloning Home actions.
+- Exported CTR2 mappings identify each button's physical label, MIDI note,
+  press type, knob mode, and action/macro, and identify each knob's mode,
+  gesture, CC, output, action, and mode-dependent Button direction notes.
 
 **QK4 Mobile v1.0.4** adds a dedicated CTR2-MIDI setup and preserves the
 existing CW Keyer workflow as a separate, simultaneous USB/Bluetooth MIDI

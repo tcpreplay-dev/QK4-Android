@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(QK4 VERSION 1.0.4 LANGUAGES CXX)
+project(QK4 VERSION 1.0.4.1 LANGUAGES CXX)
 include(CTest)
 
 # Optional override paths for Opus when cross-compiling (primarily Android)
@@ -261,6 +261,7 @@ set(SOURCES
     src/ui/k4popupbase.cpp
     src/ui/kpa1500panel.cpp
     src/ui/kpa1500window.cpp
+    src/ui/adjustoverlay.cpp
     src/ui/sidecontroloverlay.cpp
     src/ui/monoverlay.cpp
     src/ui/baloverlay.cpp
@@ -370,6 +371,7 @@ set(HEADERS
     src/ui/inwindowdialog.h
     src/ui/kpa1500panel.h
     src/ui/kpa1500window.h
+    src/ui/adjustoverlay.h
     src/ui/sidecontroloverlay.h
     src/ui/monoverlay.h
     src/ui/baloverlay.h
