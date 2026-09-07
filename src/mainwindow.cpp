@@ -87,7 +87,7 @@
 #include <QTimer>
 #include <QVector>
 #include <cmath>
-#ifdef Q_OS_ANDROID
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
 #include <QPermissions>
 #endif
 
@@ -282,7 +282,7 @@ static int getNextSpanDown(int currentSpan) {
     return qMax(newSpan, SPAN_MIN);
 }
 
-#ifdef Q_OS_ANDROID
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
 static bool ensureMicrophonePermission(QWidget *parent) {
     QMicrophonePermission permission;
     Qt::PermissionStatus status = qApp->checkPermission(permission);
@@ -357,7 +357,11 @@ MainWindow::MainWindow(QWidget *parent)
     // prevents the RHI backing store from being set up correctly, causing
     // "QRhiWidget: No QRhi" errors and blank panadapter display.
     setupUi();
+    // iOS is a touch app with on-screen controls (Settings via the bottom-bar
+    // gear); the desktop File/Tools/View/Help menu bar only wastes a row.
+#ifndef Q_OS_IOS
     setupMenuBar();
+#endif
 
     connect(qApp, &QGuiApplication::applicationStateChanged, this,
             [this](Qt::ApplicationState state) {
@@ -2527,7 +2531,7 @@ MainWindow::MainWindow(QWidget *parent)
         // but always honor PTT-off so a stale gate can be cleared.
         if (on && !m_tcpClient->isConnected())
             return;
-#ifdef Q_OS_ANDROID
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
         if (on && !ensureMicrophonePermission(this)) {
             m_pttActive = false;
             m_bottomMenuBar->setPttActive(false);
@@ -2560,7 +2564,7 @@ MainWindow::MainWindow(QWidget *parent)
         m_catServer->start(RadioSettings::instance()->catServerPort());
     }
 
-#ifdef Q_OS_ANDROID
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     // Prime Android runtime permission early, before the first TX attempt.
     ensureMicrophonePermission(this);
 #endif
@@ -6603,7 +6607,7 @@ void MainWindow::onPttPressed() {
         return;
     }
 
-#ifdef Q_OS_ANDROID
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
     if (!ensureMicrophonePermission(this)) {
         return;
     }

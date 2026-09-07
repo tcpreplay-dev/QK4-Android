@@ -195,15 +195,23 @@ void configureForScreen(const QSize &availableSize, qreal devicePixelRatio, qrea
                         bool forceCompact) {
     applyDefaultDimensions();
 
-    // TEMPORARY: Until the tablet layout has been physically validated, use the
-    // proven landscape phone layout on every Android screen size. Keep the
-    // original size-based selection below for restoration once tablet testing
-    // is available.
+    // iOS: iPad (large screens) gets the regular desktop-like layout, closer
+    // to QK4 on macOS and the physical radio; iPhone keeps the compact phone
+    // layout. The short edge in landscape cleanly separates them (iPad >= ~740
+    // pt, iPhone <= ~440 pt). Android still forces the proven phone layout on
+    // every size until its tablet layout is physically validated.
+#if defined(Q_OS_IOS)
+    Q_UNUSED(devicePixelRatio);
+    Q_UNUSED(physicalDiagonalInches);
+    const int shortEdge = std::min(availableSize.width(), availableSize.height());
+    const bool useCompact = forceCompact || (shortEdge <= 700);
+#else
     Q_UNUSED(availableSize);
     Q_UNUSED(devicePixelRatio);
     Q_UNUSED(physicalDiagonalInches);
     Q_UNUSED(forceCompact);
     const bool useCompact = true;
+#endif
     /*
     bool forceCompactEnvOk = false;
     bool forceRegularEnvOk = false;
