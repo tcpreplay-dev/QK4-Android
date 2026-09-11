@@ -134,7 +134,14 @@ int main(int argc, char *argv[]) {
     setupFonts();
 
     MainWindow window;
+#if defined(Q_OS_ANDROID)
+    // Go edge-to-edge: the regular/tablet layout is sized for a fullscreen
+    // landscape surface (like the iPad). Leaving Android's status + navigation
+    // bars visible steals ~70px of height and clips the bottom controls.
+    window.showFullScreen();
+#else
     window.show();
+#endif
 
     return app.exec();
 }

@@ -169,7 +169,7 @@ QRect FrequencyDisplayWidget::charRectAt(int charIndex) const {
 int FrequencyDisplayWidget::digitPositionFromX(int x) const {
     QString display = formatWithDots();
 
-    int currentX = 0;
+    int currentX = drawStartX();
     for (int i = 0; i < display.length(); ++i) {
         int charW = (display[i] == '.') ? m_dotWidth : m_charWidth;
 
@@ -209,7 +209,46 @@ void FrequencyDisplayWidget::enterEditMode(int digitPosition) {
     m_originalDigits = m_digits;
     m_cursorPosition = digitPosition;
     setFocus();
-    grabMouse(); // Capture all mouse events to detect clicks outside
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
+    grabMouse(); // Desktop: capture mouse to detect clicks outside. On touch this
+                // would steal taps from the +/- controls used to edit digits.
+#endif
+    update();
+}
+
+void FrequencyDisplayWidget::beginEdit() {
+    if (m_cursorPosition < 0)
+        enterEditMode(displayStartIndex()); // start at the leftmost visible digit
+}
+
+void FrequencyDisplayWidget::commitEdit() {
+    if (m_cursorPosition >= 0)
+        exitEditMode(true);
+}
+
+void FrequencyDisplayWidget::cancelEdit() {
+    if (m_cursorPosition >= 0)
+        exitEditMode(false);
+}
+
+void FrequencyDisplayWidget::nudgeCursorDigit(int delta) {
+    if (m_cursorPosition < 0 || delta == 0)
+        return;
+    // Add/subtract the place value of the cursor digit so carries ripple
+    // naturally (e.g. 9->0 bumps the next digit up).
+    const int place = kMaxDigitIndex - m_cursorPosition;
+    quint64 placeValue = 1;
+    for (int i = 0; i < place; ++i)
+        placeValue *= 10;
+    qint64 value = static_cast<qint64>(m_digits.toULongLong()) + static_cast<qint64>(delta) * static_cast<qint64>(placeValue);
+    if (value < 0)
+        value = 0;
+    QString s = QString::number(static_cast<quint64>(value));
+    while (s.length() < kDigits)
+        s.prepend('0');
+    if (s.length() > kDigits)
+        s = s.right(kDigits);
+    m_digits = s;
     update();
 }
 
@@ -218,7 +257,9 @@ void FrequencyDisplayWidget::exitEditMode(bool send) {
         return; // Not in edit mode
     }
 
-    releaseMouse(); // Release mouse grab
+#if !defined(Q_OS_IOS) && !defined(Q_OS_ANDROID)
+    releaseMouse(); // Release mouse grab (desktop only; see enterEditMode)
+#endif
 
     if (send) {
         // Remove leading zeros for the signal (but keep at least one digit)
@@ -238,6 +279,39 @@ void FrequencyDisplayWidget::exitEditMode(bool send) {
     update();
 }
 
+void FrequencyDisplayWidget::setRightAligned(bool rightAligned) {
+    if (m_rightAligned != rightAligned) {
+        m_rightAligned = rightAligned;
+        update();
+    }
+}
+
+int FrequencyDisplayWidget::displayPixelWidth() const {
+    QString display = formatWithDots();
+    int w = 0;
+    for (int i = 0; i < display.length(); ++i)
+        w += (display[i] == '.') ? m_dotWidth : m_charWidth;
+    return w;
+}
+
+void FrequencyDisplayWidget::setRightAlignEdge(int edgeX) {
+    if (m_rightAlignEdge != edgeX) {
+        m_rightAlignEdge = edgeX;
+        update();
+    }
+}
+
+int FrequencyDisplayWidget::drawStartX() const {
+    if (!m_rightAligned)
+        return 0;
+    // Digits end just inside m_rightAlignEdge (or the widget's right edge if
+    // unset). The small inset keeps the last digit off the clipped boundary and
+    // matches the radio, where the frequency sits a touch inside the meter edge.
+    constexpr int kRightInset = 16;
+    const int ref = (m_rightAlignEdge >= 0) ? m_rightAlignEdge : width();
+    return qMax(0, ref - kRightInset - displayPixelWidth());
+}
+
 void FrequencyDisplayWidget::paintEvent(QPaintEvent *) {
     QPainter p(this);
     p.setRenderHint(QPainter::Antialiasing);
@@ -246,7 +320,7 @@ void FrequencyDisplayWidget::paintEvent(QPaintEvent *) {
     QString display = formatWithDots();
 
     // Draw each character
-    int x = 0;
+    int x = drawStartX();
     int digitIdx = displayStartIndex();
 
     for (int i = 0; i < display.length(); ++i) {
@@ -262,10 +336,11 @@ void FrequencyDisplayWidget::paintEvent(QPaintEvent *) {
             // Dots always in normal color
             charColor = m_normalColor;
         } else {
-            // Normal mode: check if this digit should be grayed (tuning rate indicator)
+            // Normal mode: digits strictly below the tuning rate are grayed.
+            // The active tuning-rate digit itself stays normal and is marked by
+            // the underline below (matching the radio and QK4 on macOS).
             const int posFromRight = kMaxDigitIndex - digitIdx;
-            if (m_tuningRateDigit >= 0 && posFromRight <= m_tuningRateDigit) {
-                // This digit is at or below tuning rate - show in gray
+            if (m_tuningRateDigit >= 0 && posFromRight < m_tuningRateDigit) {
                 charColor = QColor(K4Styles::Colors::TextGray);
             } else {
                 charColor = m_normalColor;
@@ -282,6 +357,15 @@ void FrequencyDisplayWidget::paintEvent(QPaintEvent *) {
                          (m_cursorPosition < 0 && digitIdx == m_touchStepPosition))) {
             int underlineY = height() - 4;
             p.fillRect(x + 2, underlineY, charW - 4, 2, m_editColor);
+        }
+
+        // Tuning-rate indicator underline under the active digit. Guarded by
+        // m_cursorPosition < 0 so the edit-mode cursor underline takes
+        // precedence and we do not double-draw.
+        if (m_cursorPosition < 0 && c != '.' && m_tuningRateDigit >= 0 &&
+            (kMaxDigitIndex - digitIdx) == m_tuningRateDigit) {
+            int underlineY = height() - 4;
+            p.fillRect(x + 2, underlineY, charW - 4, 2, m_normalColor);
         }
 
         // Advance digit index (only for non-dot characters)
@@ -308,22 +392,24 @@ void FrequencyDisplayWidget::mousePressEvent(QMouseEvent *event) {
         if (insideWidget) {
             int digitPos = digitPositionFromX(event->pos().x());
             if (digitPos >= 0) {
-#ifdef Q_OS_ANDROID
-                // A phone has no physical keyboard. Keep the digit visibly
-                // selected and let the dedicated touch controls step it.
-                m_touchStepPosition = digitPos;
-                emit tuningDigitSelected(kMaxDigitIndex - digitPos);
-                update();
-#else
-                if (m_cursorPosition < 0) {
-                    // Not in edit mode - enter it
-                    enterEditMode(digitPos);
-                } else {
-                    // Already in edit mode - move cursor
+                if (m_cursorPosition >= 0) {
+                    // Already in the edit field - move the cursor to the tap.
                     m_cursorPosition = digitPos;
                     update();
-                }
+                } else {
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+                    // Touch devices have no physical keyboard. Tapping a digit
+                    // selects the tuning rate at that place (the radio's
+                    // behaviour: click a right-hand digit to set 1 Hz .. 10 kHz).
+                    // The blue edit field is reached via the FREQ ENT control.
+                    m_touchStepPosition = digitPos;
+                    emit tuningDigitSelected(kMaxDigitIndex - digitPos);
+                    update();
+#else
+                    // Desktop - tapping enters the edit field directly.
+                    enterEditMode(digitPos);
 #endif
+                }
             }
         }
     }
