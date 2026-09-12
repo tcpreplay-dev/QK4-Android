@@ -31,6 +31,7 @@ public:
     void setTransmitting(bool active, const QString &detail = QString());
     void setTransmitStatus(const QString &detail);
     void setTransmitWarning(const QString &warning);
+    void setTransmitProtection(const QString &text, bool fault);
     void setRadioOperatingState(const QString &rxFrequency, const QString &rxMode,
                                 const QString &txFrequency, const QString &txMode);
     void returnToAutoReceive();
@@ -54,6 +55,10 @@ signals:
     void transmitRequested(const QImage &frame, int modeId);
     void stopRequested();
     void powerRequested(double watts);
+    void audioSetupRequested();
+    void logQsoRequested(const QString &callsign, bool transmit, qint64 receivedFrequencyHz,
+                         const QDateTime &receivedUtc);
+    void logbookRequested();
 
 protected:
     void resizeEvent(QResizeEvent *event) override;
@@ -62,6 +67,7 @@ protected:
 
 private:
     void setupUi();
+    void requestLogQso(bool transmit);
     void selectTab(bool transmit);
     void chooseImage();
     void chooseCameraImage();
@@ -137,6 +143,7 @@ private:
     QLabel *m_txFrameLabel = nullptr;
     QLabel *m_modeDetail = nullptr;
     QLabel *m_powerLabel = nullptr;
+    QLabel *m_protectionLabel = nullptr;
     QLabel *m_txStateLabel = nullptr;
     QLabel *m_frameZoomLabel = nullptr;
     QProgressBar *m_txProgress = nullptr;

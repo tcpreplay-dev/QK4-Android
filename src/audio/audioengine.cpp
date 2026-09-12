@@ -796,6 +796,9 @@ void AudioEngine::closeMic() {
 }
 
 void AudioEngine::setPttActive(bool active) {
+    if (active && (m_sstvPrepared || (m_digitalControl && (m_digitalControl->generation.load() != 0
+        || m_digitalControl->scheduledGeneration.load() != 0))))
+        return;
     m_pttActive.store(active, std::memory_order_release);
     if (active) {
 #ifdef Q_OS_ANDROID
@@ -835,11 +838,35 @@ void AudioEngine::setFrameSamples(int samples) {
     m_frameSamples.store(samples, std::memory_order_relaxed);
 }
 
+void AudioEngine::beginFt8Encoding(quint64 generation) {
+    if (!m_digitalControl || !m_digitalControl->allows(generation)) return;
+    if (m_sstvPrepared || m_pttActive.load() || (m_opusEncoder && !m_opusEncoder->reset())) {
+        m_digitalControl->audioFault.store(generation);
+        m_digitalControl->close(generation);
+        return;
+    }
+    m_ft8EncodingGeneration = generation;
+    m_txSequence = 0;
+    m_digitalAudio.reset(m_digitalControl->gain.load());
+}
+void AudioEngine::encodeFt8Frame(const QVector<qint16> &input, int emitted, int total, quint64 generation) {
+    if (generation != m_ft8EncodingGeneration || !m_digitalControl->allows(generation)) return;
+    auto samples = input;
+    if (!m_digitalAudio.process(samples, *m_digitalControl, generation)) return;
+    m_ft8Emitted = emitted;
+    m_ft8Total = total;
+    const QByteArray frame(reinterpret_cast<const char *>(samples.constData()), samples.size() * sizeof(qint16));
+    encodeAndSendFrame(frame, samples.size(), m_encodeMode.load(), true);
+}
+void AudioEngine::finishFt8Encoding(quint64 generation) {
+    if (m_ft8EncodingGeneration == generation) m_ft8EncodingGeneration = 0;
+}
 void AudioEngine::prepareSstvTransmit(const QImage &frame, int modeId,
                                       const QString &morseId, int morseWpm,
                                       const QString &fskId,
                                       quint64 generation) {
     m_sstvGeneration = generation;
+    m_calibrationTone = false;
     if (m_sstvActive.load(std::memory_order_acquire)) {
         emit sstvPrepared(false, QStringLiteral("SSTV transmission is already active."), 0, generation);
         return;
@@ -855,6 +882,8 @@ void AudioEngine::prepareSstvTransmit(const QImage &frame, int modeId,
 }
 
 void AudioEngine::beginSstvTransmit() {
+    if (!m_digitalControl || !m_digitalControl->allows(m_sstvGeneration.load()))
+        return;
     if (!m_sstvPrepared || m_sstvActive.exchange(true, std::memory_order_acq_rel))
         return;
 
@@ -862,8 +891,11 @@ void AudioEngine::beginSstvTransmit() {
     // sequence. Speech from an earlier PTT session must not influence the
     // first SSTV leader packet.
     m_txSequence = 0;
+    m_digitalAudio.reset(m_digitalControl->gain.load(std::memory_order_acquire));
     if (m_opusEncoder && !m_opusEncoder->reset()) {
         const quint64 generation = m_sstvGeneration;
+        m_digitalControl->audioFault.store(generation, std::memory_order_release);
+        m_digitalControl->close(generation);
         m_sstvActive.store(false, std::memory_order_release);
         m_sstvPrepared = false;
         emit sstvFailed(QStringLiteral("The K4 audio encoder could not be reset for SSTV."), generation);
@@ -887,7 +919,22 @@ void AudioEngine::stopSstvTransmit() {
 }
 
 void AudioEngine::requestSstvStop() {
+    if (m_digitalControl)
+        m_digitalControl->close(m_sstvGeneration.load(std::memory_order_acquire));
     m_sstvActive.store(false, std::memory_order_release);
+}
+
+void AudioEngine::prepareDigitalCalibration(int toneHz, quint64 generation) {
+    if (m_sstvActive.load(std::memory_order_acquire) || m_pttActive.load()) {
+        emit digitalCalibrationPreparationFailed("Calibration unavailable: another audio transmission is active.", generation);
+        return;
+    }
+    m_sstvGeneration = generation;
+    m_calibrationHz = qBound(100, toneHz, 3200);
+    m_calibrationPhase = 0;
+    m_calibrationTone = true;
+    m_sstvPrepared = true;
+    emit digitalCalibrationPrepared(generation);
 }
 
 const QByteArray &AudioEngine::resample48kTo12k(const QByteArray &input48k) {
@@ -982,7 +1029,19 @@ void AudioEngine::onSstvPacer() {
         return;
 
     const int frameSamples = m_frameSamples.load(std::memory_order_relaxed);
-    QVector<qint16> samples = m_sstvEncoder.nextSamples(frameSamples);
+    QVector<qint16> samples;
+    if (m_calibrationTone) {
+        samples.resize(frameSamples);
+        for (auto &sample : samples) {
+            sample = qint16(qRound(std::sin(m_calibrationPhase) * 26213.0));
+            m_calibrationPhase = std::fmod(m_calibrationPhase + 2.0 * M_PI * m_calibrationHz / 12000.0, 2.0 * M_PI);
+        }
+    } else
+        samples = m_sstvEncoder.nextSamples(frameSamples);
+    if (!m_digitalControl || !m_digitalAudio.process(samples, *m_digitalControl, m_sstvGeneration.load())) {
+        stopSstvTransmit();
+        return; // I/O watchdog owns the fault report and immediate unkey.
+    }
     if (!samples.isEmpty()) {
         // K4/Opus packetization requires the configured SL frame size. Pad
         // only the final packet; encoder progress still reports on-air image
@@ -996,7 +1055,7 @@ void AudioEngine::onSstvPacer() {
                                samples.size() * static_cast<int>(sizeof(qint16)));
         encodeAndSendFrame(frame, frameSamples, m_encodeMode.load(std::memory_order_relaxed), true);
     }
-    if (m_sstvEncoder.isComplete())
+    if (!m_calibrationTone && m_sstvEncoder.isComplete())
         stopSstvTransmit();
 }
 
@@ -1029,20 +1088,26 @@ void AudioEngine::encodeAndSendFrame(const QByteArray &s16leData, int frameSampl
     case 2:
     case 3:
     default:
-        audioData = m_opusEncoder ? m_opusEncoder->encode(s16leData, frameSamples) : QByteArray();
+        audioData = m_opusEncoder ? m_opusEncoder->encode(s16leData, frameSamples, sstvProgram) : QByteArray();
         break;
     }
 
     if (!audioData.isEmpty()) {
         const QByteArray packet = Protocol::buildAudioPacket(audioData, m_txSequence++, encodeMode, frameSamples);
-        if (sstvProgram)
+        if (sstvProgram && m_ft8EncodingGeneration)
+            emit sstvPacketReady(packet, m_ft8Emitted, m_ft8Total, m_ft8Total, m_ft8EncodingGeneration);
+        else if (sstvProgram)
             emit sstvPacketReady(packet, m_sstvEncoder.emittedSamples(),
                                  m_sstvEncoder.totalSamples(), m_sstvEncoder.imageSamples(),
                                  m_sstvGeneration);
         else
             emit txPacketReady(packet);
     } else if (sstvProgram) {
-        const quint64 generation = m_sstvGeneration;
+        const quint64 generation = m_ft8EncodingGeneration ? m_ft8EncodingGeneration : m_sstvGeneration.load();
+        if (m_digitalControl) {
+            m_digitalControl->audioFault.store(generation, std::memory_order_release);
+            m_digitalControl->close(generation);
+        }
         emit sstvFailed(QStringLiteral("The selected K4 audio encoding could not carry SSTV program audio."),
                         generation);
         stopSstvTransmit();

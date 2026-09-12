@@ -565,6 +565,14 @@ upload contacts.
 
 ## TX audio level and timing
 
+The shared FT8/FT4/SSTV calibration and protection implementation is documented
+in [DIGITAL_TX_LEVEL.md](DIGITAL_TX_LEVEL.md). SSTV now requires a remembered
+calibration matching the radio setup, attenuates program audio, checks codec
+headroom, automatically reduces drive for high ALC, and stops on overload or
+missing feedback. Its protection status persists above both RX and TX pages.
+TEST-mode calibration and provisional raw ALC thresholds still require K4
+hardware and RF acceptance; the requirements below remain the acceptance scope.
+
 - Generate mono signed 16-bit PCM at the K4 TX stream's native 12 kHz rate.
   Use a continuous phase accumulator across every tone and packet boundary;
   quantize segment duration with carried fractional-sample error so total line

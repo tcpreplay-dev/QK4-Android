@@ -14,3 +14,22 @@ void setSstvOrientationEnabled(bool enabled) {
 #else
 void setSstvOrientationEnabled(bool) {}
 #endif
+
+void setFt8PortraitEnabled(bool enabled) {
+#ifdef Q_OS_ANDROID
+    const QJniObject activity = QNativeInterface::QAndroidApplication::context();
+    if (activity.isValid())
+        activity.callMethod<void>("setRequestedOrientation", "(I)V",
+                                  jint(enabled ? 1 /* PORTRAIT */ : 6 /* SENSOR_LANDSCAPE */));
+#else
+    Q_UNUSED(enabled)
+#endif
+}
+void setRadioLogbookOrientationEnabled(bool enabled) {
+#ifdef Q_OS_ANDROID
+    QJniObject::callStaticMethod<void>("com/w9wdx/qk4phone/Qk4Activity",
+                                     "setRadioLogbookRotation", "(Z)V", jboolean(enabled));
+#else
+    Q_UNUSED(enabled)
+#endif
+}

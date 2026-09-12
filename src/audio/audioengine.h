@@ -12,6 +12,7 @@
 #include <QMutex>
 #include <atomic>
 #include "sstv/sstvencoder.h"
+#include "digitaltxguard.h"
 
 class OpusEncoder;
 
@@ -55,6 +56,11 @@ public:
     // audio timer from producing any further program packet; the queued stop
     // then disposes the encoder on its owning thread.
     void requestSstvStop();
+    void setDigitalTxControl(std::shared_ptr<DigitalTxControl> control) { m_digitalControl = std::move(control); }
+    void beginFt8Encoding(quint64 generation);
+    void encodeFt8Frame(const QVector<qint16> &samples, int emitted, int total, quint64 generation);
+    void finishFt8Encoding(quint64 generation);
+    Q_INVOKABLE void prepareDigitalCalibration(int toneHz, quint64 generation);
     bool isSstvTransmitActive() const { return m_sstvActive.load(std::memory_order_acquire); }
 
     // Channel volume controls (applied at playback time for instant response)
@@ -101,6 +107,8 @@ signals:
     void sstvFailed(const QString &reason, quint64 generation);
     void sstvProgress(int emittedSamples, int totalSamples);
     void sstvFinished(quint64 generation);
+    void digitalCalibrationPrepared(quint64 generation);
+    void digitalCalibrationPreparationFailed(const QString &reason, quint64 generation);
     void bufferStatus(int queueBytes, int maxBytes, bool prebuffering);
 
 private slots:
@@ -196,7 +204,14 @@ private:
     std::atomic<bool> m_sstvActive{false};
     bool m_sstvPrepared = false;
     SstvEncoder m_sstvEncoder;
-    quint64 m_sstvGeneration = 0;
+    std::atomic<quint64> m_sstvGeneration{0};
+    quint64 m_ft8EncodingGeneration = 0;
+    int m_ft8Emitted = 0, m_ft8Total = 0;
+    std::shared_ptr<DigitalTxControl> m_digitalControl;
+    DigitalTxAudio m_digitalAudio;
+    bool m_calibrationTone = false;
+    int m_calibrationHz = 1500;
+    double m_calibrationPhase = 0;
     QTimer *m_sstvPacerTimer = nullptr;
 
     // Audio throughput: 12kHz × 2ch × sizeof(float) = 96,000 bytes/sec = 96 bytes/ms

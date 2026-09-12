@@ -1,5 +1,6 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
+#include "ft8/ft8radiomode.h"
 
 #include <QMainWindow>
 #include <QLabel>
@@ -11,6 +12,7 @@
 #include <QThread>
 #include <QStackedWidget>
 #include <atomic>
+#include <QPointer>
 #include "network/tcpclient.h"
 #include "settings/radiosettings.h"
 #include "models/radiostate.h"
@@ -67,6 +69,9 @@ class QResizeEvent;
 class QImage;
 class SstvScreen;
 class SstvDecoder;
+class Ft8Screen;
+class Ft8Receiver;
+class Ft8Transmitter;
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -204,12 +209,24 @@ private:
     void setPhoneTxInputShieldActive(bool active);
     void updatePhoneTxInputShieldGeometry();
     void openSstvScreen();
+    void openLogbook(bool fromSstv = false);
+    void openFt8Screen();
+    void updateFt8RadioMode();
+    void refreshFt8Capture();
+    QString ft8TransmitReadiness() const;
+    void startFt8Transmit(const QString &message, int mode, int hz, qint64 slotUtc);
+    void stopFt8Transmit();
     void refreshSstvRadioHeader();
     void startSstvTransmit(const QImage &frame, int modeId);
     void stopSstvTransmission();
     void beginSstvTransmitDrain();
     void finishSstvTransmission();
     void setSstvRfPower(double watts);
+    void showDigitalAudioSetup(int mode, QWidget *surface);
+    void startDigitalCalibration(int mode);
+    void cancelDigitalCalibration();
+    QString digitalCalibrationContext(int mode) const;
+    void showDigitalProtection(int mode, const QString &text, bool fault);
 
     // Band and mini pan helpers
     int getBandFromFrequency(quint64 freq);
@@ -230,6 +247,14 @@ private:
     SstvDecoder *m_sstvDecoder = nullptr;
     QThread *m_sstvDecoderThread = nullptr;
     std::atomic<bool> m_sstvRxArmed{false};
+    Ft8Receiver *m_ft8Receiver = nullptr;
+    Ft8Transmitter *m_ft8Transmitter = nullptr;
+    quint64 m_ft8TxGeneration = 0;
+    QString m_ft8TransmitContext;
+    qint64 m_ft8TransmitFrequency = 0;
+    QThread *m_ft8Thread = nullptr;
+    Ft8Screen *m_ft8Screen = nullptr;
+    Ft8RadioMode m_ft8RadioMode;
 
     // PTT state
     bool m_pttActive = false;
@@ -342,9 +367,16 @@ private:
     bool m_sstvTxStarting = false;
     bool m_sstvTxActive = false;
     bool m_sstvTxDraining = false;
-    int m_sstvPeakAlc = 0;
-    bool m_sstvAlcWarningShown = false;
+    bool m_sstvProtectionFault = false, m_sstvProtectionReduced = false;
     quint64 m_sstvGeneration = 0;
+    bool m_digitalCalibrating = false;
+    bool m_digitalCalibrationStarted = false;
+    int m_digitalCalibrationMode = 0;
+    quint64 m_digitalCalibrationGeneration = 0;
+    QString m_digitalCalibrationContext;
+    QString m_sstvTransmitContext;
+    QMap<QString, float> m_digitalReducedGains;
+    QPointer<QLabel> m_digitalSetupStatus;
 
     // Menu system
     MenuModel *m_menuModel;

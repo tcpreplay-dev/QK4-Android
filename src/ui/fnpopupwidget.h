@@ -67,7 +67,9 @@ const QString Macros = "MACROS";
 const QString SwList = "SW_LIST";
 const QString Update = "UPDATE";
 const QString DxList = "DXLIST";
+const QString Log = "LOGBOOK";
 const QString Sstv = "SSTV";
+const QString Ft8 = "FT8_FT4";
 } // namespace MacroIds
 
 /**
@@ -124,7 +126,7 @@ private:
  * Button 5: SCRN CAP / MACROS
  * Button 6: SW LIST / UPDATE
  * Button 7: DXLIST
- * Button 8: SSTV
+ * Button 8: FT8/FT4 (tap) / SSTV (hold)
  */
 class FnPopupWidget : public K4PopupBase {
     Q_OBJECT

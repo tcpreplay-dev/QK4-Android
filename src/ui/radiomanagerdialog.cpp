@@ -1,4 +1,5 @@
 #include "radiomanagerdialog.h"
+#include "overlaybackhandler.h"
 #include "k4styles.h"
 #include "network/protocol.h"
 #include <QBoxLayout>
@@ -15,6 +16,7 @@
 #include <QLabel>
 
 RadioManagerDialog::RadioManagerDialog(QWidget *parent) : QWidget(parent), m_currentIndex(-1) {
+    new OverlayBackHandler(this, [this] { onBackClicked(); });
     setupUi();
     refreshList();
     updateButtonStates();

@@ -179,9 +179,10 @@ void MidiInputRouter::routeNote(const QString &sourceId, const DeviceMapping &ma
         }
     }
 
-    // CTR2 buttons are actions on release. This avoids executing both the
-    // NoteOn and NoteOff halves of one physical short/long button gesture.
-    if (!pressed) {
+    // CTR2 classifies short/long presses in hardware and sends a positive
+    // NoteOn on physical release. There need not be a subsequent NoteOff.
+    // Keep other profiles' release handling and the CW/PTT edges above intact.
+    if (mapping.profile == Profile::Ctr2 ? pressed : !pressed) {
         const auto it = mapping.buttons.constFind(note);
         if (it == mapping.buttons.cend() || it->action == QStringLiteral("disabled"))
             return;

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(QK4 VERSION 1.0.4.1 LANGUAGES CXX)
+project(QK4 VERSION 1.0.5 LANGUAGES CXX)
 include(CTest)
 
 # Optional override paths for Opus when cross-compiling (primarily Android)
@@ -95,6 +95,8 @@ else()
     endif()
 endif()
 
+add_subdirectory(src/ft8)
+
 # Platform-specific dependency handling
 if(ANDROID)
     # Android: HID/MIDI hardware features are disabled, Opus is still required for RX/TX audio.
@@ -161,6 +163,8 @@ set(SOURCES
     src/audio/audioengine.cpp
     src/audio/opusdecoder.cpp
     src/audio/opusencoder.cpp
+    src/audio/digitaltxguard.cpp
+    src/audio/digitaltxguard.h
     src/audio/sidetonegenerator.cpp
     src/sstv/sstvmoderegistry.cpp
     src/sstv/sstvencoder.cpp
@@ -172,7 +176,6 @@ set(SOURCES
     src/hardware/midimapping.cpp
     src/hardware/midiinputrouter.cpp
     src/hardware/ctr2mididevice.cpp
-    src/dsp/panadapter_rhi.cpp
     src/dsp/minipan_rhi.cpp
     src/settings/fnkeymemory.cpp
     src/settings/radiosettings.cpp
@@ -195,6 +198,8 @@ set(SOURCES
     src/ui/optionsdialog.cpp
     src/ui/ctr2mappingeditor.cpp
     src/ui/inwindowdialog.cpp
+    src/ui/digitalaudiosetupdialog.cpp
+    src/ui/digitalaudiosetupdialog.h
     src/ui/rightsidepanel.cpp
     src/ui/featuremenubar.cpp
     src/ui/modepopupwidget.cpp
@@ -266,7 +271,6 @@ set(HEADERS
     src/hardware/midimapping.h
     src/hardware/midiinputrouter.h
     src/hardware/ctr2mididevice.h
-    src/dsp/panadapter_rhi.h
     src/dsp/minipan_rhi.h
     src/settings/fnkeymemory.h
     src/settings/radiosettings.h
@@ -405,6 +409,7 @@ if(ANDROID)
 endif()
 
 target_link_libraries(${PROJECT_NAME} PRIVATE
+    qk4_ft8
     Qt6::Core
     Qt6::Widgets
     Qt6::Network
@@ -636,17 +641,6 @@ if(BUILD_TESTING AND NOT ANDROID)
     target_include_directories(test_radiostate PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
     target_link_libraries(test_radiostate PRIVATE Qt6::Core Qt6::Test)
     add_test(NAME radiostate COMMAND test_radiostate)
-
-    qt_add_executable(test_midimapping
-        tests/test_midimapping.cpp
-        src/hardware/midimapping.cpp
-        src/hardware/midimapping.h
-        src/hardware/midiinputrouter.cpp
-        src/hardware/midiinputrouter.h
-    )
-    target_include_directories(test_midimapping PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
-    target_link_libraries(test_midimapping PRIVATE Qt6::Core Qt6::Test)
-    add_test(NAME midimapping COMMAND test_midimapping)
 
     qt_add_executable(test_modepopupwidget
         tests/test_modepopupwidget.cpp

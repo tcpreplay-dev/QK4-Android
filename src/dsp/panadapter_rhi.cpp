@@ -8,6 +8,7 @@
 #include <QtMath>
 #include <cmath>
 #include <cstring>
+#include <algorithm>
 
 // Transparent overlay widget for dBm/S-unit scale labels
 class DbmScaleOverlay : public QWidget {
@@ -103,6 +104,7 @@ private:
 // Transparent overlay widget for frequency scale labels at spectrum/waterfall boundary
 class FrequencyScaleOverlay : public QWidget {
 public:
+    void setAudioUnits(bool enabled) { m_audioUnits = enabled; update(); }
     FrequencyScaleOverlay(QWidget *parent = nullptr) : QWidget(parent) {
         setAttribute(Qt::WA_TransparentForMouseEvents);
         setAttribute(Qt::WA_TranslucentBackground);
@@ -156,7 +158,7 @@ protected:
         // Measure sample label width for spacing check
         QString sampleLabel = formatFrequency(firstLabel);
         int labelWidth = fm.horizontalAdvance(sampleLabel);
-        int minSpacing = labelWidth + 12; // Minimum gap between labels
+        int minSpacing = m_audioUnits ? 14 : labelWidth + 12; // Minimum gap between labels
 
         // Draw labels at each interval
         int lastDrawnX = -1000; // Track last drawn position for overlap prevention
@@ -221,12 +223,14 @@ private:
     // Format frequency as MHz string with adaptive decimal places
     // Narrow spans need more precision to avoid duplicate labels
     QString formatFrequency(qint64 freqHz) const {
+        if (m_audioUnits) return QString::number(freqHz);
         double freqMHz = freqHz / 1000000.0;
         // Use 4 decimals for spans <= 20 kHz, 3 decimals for wider spans
         int decimals = (m_spanHz <= 20000) ? 4 : 3;
         return QString::number(freqMHz, 'f', decimals);
     }
 
+    bool m_audioUnits = false;
     qint64 m_centerFreq = 0;
     int m_spanHz = 10000;
     int m_cwPitch = 500;
@@ -465,9 +469,32 @@ void PanadapterRhiWidget::initSpectrumLUT() {
     }
 }
 
+void PanadapterRhiWidget::releaseResources() {
+    // QRhiWidget can recreate its graphics context when the window/surface
+    // changes. No resource may be reused with a different QRhi instance.
+    m_waterfallPipeline.reset(); m_overlayLinePipeline.reset(); m_peakLinePipeline.reset();
+    m_overlayTrianglePipeline.reset(); m_spectrumBlueAmpPipeline.reset();
+    m_waterfallSrb.reset(); m_overlaySrb.reset(); m_passbandSrb.reset();
+    m_markerSrb.reset(); m_notchSrb.reset(); m_spectrumBlueAmpSrb.reset();
+    m_secondaryPassbandSrb.reset(); m_secondaryMarkerSrb.reset();
+    m_waterfallVbo.reset(); m_waterfallUniformBuffer.reset();
+    m_overlayVbo.reset(); m_overlayUniformBuffer.reset();
+    m_passbandVbo.reset(); m_passbandUniformBuffer.reset();
+    m_markerVbo.reset(); m_markerUniformBuffer.reset();
+    m_notchVbo.reset(); m_notchUniformBuffer.reset();
+    m_fullscreenQuadVbo.reset(); m_spectrumBlueAmpUniformBuffer.reset();
+    m_secondaryPassbandVbo.reset(); m_secondaryPassbandUniformBuffer.reset();
+    m_secondaryMarkerVbo.reset(); m_secondaryMarkerUniformBuffer.reset();
+    m_waterfallTexture.reset(); m_colorLutTexture.reset(); m_spectrumDataTexture.reset();
+    m_spectrumColorLutTexture.reset(); m_sampler.reset();
+    m_rhiInitialized = m_pipelinesCreated = m_firstFrameRendered = false;
+    m_rhi = nullptr; m_rpDesc = nullptr;
+}
+
 void PanadapterRhiWidget::initialize(QRhiCommandBuffer *cb) {
-    if (m_rhiInitialized)
+    if (m_rhiInitialized && m_rhi == rhi())
         return;
+    if (m_rhiInitialized) releaseResources();
 
     m_rhi = rhi();
     if (!m_rhi) {
@@ -477,11 +504,13 @@ void PanadapterRhiWidget::initialize(QRhiCommandBuffer *cb) {
 
     // Use fixed texture sizes - GPU bilinear filtering handles scaling to display size
     m_textureWidth = BASE_TEXTURE_WIDTH;
-    m_waterfallHistory = BASE_WATERFALL_HISTORY;
+    m_waterfallHistory = m_audioView ? 256 : BASE_WATERFALL_HISTORY;
 
     // Allocate waterfall data buffer
-    m_waterfallData.resize(m_textureWidth * m_waterfallHistory);
-    m_waterfallData.fill(0);
+    if (!m_audioView || m_waterfallData.size() != m_textureWidth * m_waterfallHistory) {
+        m_waterfallData.resize(m_textureWidth * m_waterfallHistory);
+        m_waterfallData.fill(0);
+    }
 
     // Load shaders from compiled .qsb resources
     m_spectrumBlueVert = RhiUtils::loadShader(":/shaders/src/dsp/shaders/spectrum_blue.vert.qsb");
@@ -551,7 +580,7 @@ void PanadapterRhiWidget::initialize(QRhiCommandBuffer *cb) {
     m_overlayVbo->create();
 
     // Create uniform buffers
-    m_waterfallUniformBuffer.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 16));
+    m_waterfallUniformBuffer.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, sizeof(RhiUtils::WaterfallUniforms)));
     m_waterfallUniformBuffer->create();
 
     m_overlayUniformBuffer.reset(m_rhi->newBuffer(QRhiBuffer::Dynamic, QRhiBuffer::UniformBuffer, 32));
@@ -831,12 +860,10 @@ void PanadapterRhiWidget::render(QRhiCommandBuffer *cb) {
     // Update waterfall uniform buffer with bin parameters
     float scrollOffset = static_cast<float>(m_waterfallWriteRow) / m_waterfallHistory;
     float binCount = static_cast<float>(m_currentSpectrum.isEmpty() ? m_textureWidth : m_currentSpectrum.size());
-    struct {
-        float scrollOffset;
-        float binCount;
-        float textureWidth;
-        float padding;
-    } waterfallUniforms = {scrollOffset, binCount, static_cast<float>(m_textureWidth), 0.0f};
+    if (m_audioView) binCount = float(qMax(1, int(m_audioSpectrum.size())));
+    RhiUtils::WaterfallUniforms waterfallUniforms = {scrollOffset, binCount, static_cast<float>(m_textureWidth), 0.0f,
+        m_audioView ? float((m_audioLowHz - m_audioFirstHz) / (binCount * m_audioBinHz)) : 0.0f,
+        m_audioView ? float(m_audioSpanHz / (binCount * m_audioBinHz)) : 1.0f, 0.0f, 0.0f};
     rub->updateDynamicBuffer(m_waterfallUniformBuffer.get(), 0, sizeof(waterfallUniforms), &waterfallUniforms);
 
     // Calculate smoothed baseline for spectrum normalization
@@ -1461,6 +1488,74 @@ void PanadapterRhiWidget::updateSpectrum(const QByteArray &bins, qint64 centerFr
     update();
 }
 
+void PanadapterRhiWidget::setAudioView(double lowHz, double spanHz) {
+    if (!std::isfinite(lowHz) || !std::isfinite(spanHz) || spanHz <= 0) return;
+    if (!m_audioView) {
+        // Set before showing the widget; retain audio history independently of
+        // its viewport so zooming never rewrites historical frequencies.
+        Q_ASSERT(!m_rhiInitialized);
+        m_audioView = true;
+        m_waterfallHistory = 256;
+        m_waterfallData.fill(0, m_textureWidth * m_waterfallHistory);
+        m_dbmScaleOverlay->hide();
+        m_freqScaleOverlay->setAudioUnits(true);
+        m_cursorVisible = false;
+        m_filterBw = 0;
+    }
+    m_audioLowHz = lowHz;
+    m_audioSpanHz = spanHz;
+    m_centerFreq = qRound64(lowHz + spanHz / 2);
+    m_spanHz = qRound(spanHz);
+    updateAudioTrace();
+    updateFreqScaleOverlay();
+    update();
+}
+
+void PanadapterRhiWidget::updateAudioTrace() {
+    if (m_audioSpectrum.isEmpty()) { m_currentSpectrum.clear(); return; }
+    const int count = qBound(2, qCeil(m_audioSpanHz / m_audioBinHz), m_textureWidth);
+    m_currentSpectrum.resize(count);
+    for (int i = 0; i < count; ++i) {
+        const double bin = (m_audioLowHz + (i + 0.5) * m_audioSpanHz / count - m_audioFirstHz) / m_audioBinHz;
+        const int left = int(std::floor(bin));
+        if (left < 0 || left >= m_audioSpectrum.size()) { m_currentSpectrum[i] = m_minDb; continue; }
+        const int right = qMin(left + 1, int(m_audioSpectrum.size()) - 1);
+        const float fraction = float(bin - left);
+        m_currentSpectrum[i] = m_audioSpectrum[left] * (1 - fraction) + m_audioSpectrum[right] * fraction;
+    }
+}
+
+void PanadapterRhiWidget::updateAudioSpectrum(const QVector<float> &db, double firstBinHz, double binHz) {
+    if (!m_audioView || db.isEmpty() || db.size() > m_textureWidth ||
+        !std::isfinite(firstBinHz) || !std::isfinite(binHz) || binHz <= 0) return;
+    const bool geometryChanged = !m_audioSpectrum.isEmpty() &&
+        (db.size() != m_audioSpectrum.size() || firstBinHz != m_audioFirstHz || binHz != m_audioBinHz);
+    if (geometryChanged) {
+        m_waterfallData.fill(0); m_waterfallWriteRow = 0; m_audioFloorValid = false;
+    }
+    m_audioFirstHz = firstBinHz; m_audioBinHz = binHz;
+    m_audioSpectrum = db;
+    for (auto &value : m_audioSpectrum) if (!std::isfinite(value)) value = -120;
+    auto sorted = m_audioSpectrum;
+    std::nth_element(sorted.begin(), sorted.begin() + sorted.size() / 3, sorted.end());
+    const float floor = sorted[sorted.size() / 3];
+    m_audioFloor = m_audioFloorValid ? 0.92f * m_audioFloor + 0.08f * floor : floor;
+    m_audioFloorValid = true;
+    m_minDb = m_audioFloor - 24; m_maxDb = m_audioFloor + 48;
+    updateAudioTrace();
+    const int offset = (m_textureWidth - int(db.size())) / 2;
+    quint8 *row = m_waterfallData.data() + m_waterfallWriteRow * m_textureWidth;
+    std::memset(row, 0, m_textureWidth);
+    for (int i = 0; i < m_audioSpectrum.size(); ++i)
+        row[offset + i] = quint8(qBound(0, int(normalizeDb(m_audioSpectrum[i]) * 255), 255));
+    m_waterfallWriteRow = (m_waterfallWriteRow + 1) % m_waterfallHistory;
+    // Audio arrives much more slowly than PAN frames. A bounded 1 MB history
+    // upload also preserves every row when several arrive before a UI frame.
+    m_waterfallNeedsFullClear = true;
+    m_waterfallNeedsUpdate = false;
+    update();
+}
+
 void PanadapterRhiWidget::updateMiniSpectrum(const QByteArray &bins) {
     m_rawSpectrum.resize(bins.size());
     for (int i = 0; i < bins.size(); ++i) {
@@ -1645,6 +1740,8 @@ void PanadapterRhiWidget::setCwPitch(int pitchHz) {
 }
 
 void PanadapterRhiWidget::clear() {
+    m_audioSpectrum.clear();
+    m_audioFloorValid = false;
     m_currentSpectrum.clear();
     m_rawSpectrum.clear();
     m_peakHold.clear();
@@ -1690,6 +1787,7 @@ void PanadapterRhiWidget::setWaterfallColor(int color) {
     initColorLUT();
     m_waterfallColorNeedsUpdate = m_rhiInitialized;
     update();
+    emit waterfallAppearanceChanged(m_waterfallColor, m_waterfallColorRange);
 }
 
 void PanadapterRhiWidget::setWaterfallColorRange(int range) {
@@ -1701,6 +1799,7 @@ void PanadapterRhiWidget::setWaterfallColorRange(int range) {
     initColorLUT();
     m_waterfallColorNeedsUpdate = m_rhiInitialized;
     update();
+    emit waterfallAppearanceChanged(m_waterfallColor, m_waterfallColorRange);
 }
 
 void PanadapterRhiWidget::setPeakHoldEnabled(bool enabled) {

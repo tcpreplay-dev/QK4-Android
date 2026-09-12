@@ -5,6 +5,7 @@
 #include <QColor>
 #include <QFont>
 #include "wheelaccumulator.h"
+class QTimer;
 
 /**
  * FrequencyDisplayWidget - Inline frequency display with segment-based editing.
@@ -57,6 +58,10 @@ public:
 
     // Check if currently in edit mode
     bool isEditing() const;
+    // Opt-in fitting and phone gestures for embedded frequency displays.
+    void setAutoFit(bool enabled);
+    void setTouchTuningEnabled(bool enabled);
+    void setSelectedTuningDigit(int digitFromRight);
 
 signals:
     // Emitted when user presses Enter to confirm frequency entry
@@ -72,10 +77,15 @@ signals:
     // Emitted on Android when a displayed digit is chosen for touch stepping.
     // digitFromRight is 0 for 1 Hz, 3 for 1 kHz, 6 for 1 MHz, etc.
     void tuningDigitSelected(int digitFromRight);
+    void directEntryRequested();
 
 protected:
+    bool event(QEvent *event) override;
     void paintEvent(QPaintEvent *event) override;
     void mousePressEvent(QMouseEvent *event) override;
+    void mouseMoveEvent(QMouseEvent *event) override;
+    void mouseReleaseEvent(QMouseEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
     void keyPressEvent(QKeyEvent *event) override;
     void focusOutEvent(QFocusEvent *event) override;
     void wheelEvent(QWheelEvent *event) override;
@@ -106,6 +116,7 @@ private:
 
     // Parse frequency string and normalize to kDigits.
     void parseFrequency(const QString &freq);
+    void updateFontMetrics();
 
     // Member variables
     QString m_digits;          // kDigits-wide string, left-padded with zeros
@@ -125,6 +136,14 @@ private:
     // Cached character metrics for click detection
     int m_charWidth = 0;
     int m_dotWidth = 0;
+    bool m_autoFit = false;
+#ifdef Q_OS_ANDROID
+    bool m_touchTuningEnabled = true;
+#else
+    bool m_touchTuningEnabled = false;
+#endif
+    QPoint m_touchPress;
+    QTimer *m_holdTimer = nullptr;
 };
 
 #endif // FREQUENCYDISPLAYWIDGET_H

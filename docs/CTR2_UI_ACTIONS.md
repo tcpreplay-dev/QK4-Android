@@ -14,6 +14,60 @@ the appropriate control surface. When a knob mode is mapped to **Selected
 adjustment**, pressing an **Adjust:** button opens and selects the surface,
 displays `CTR2 KNOB: ...`, and assigns the knob to it.
 
+## FT8 / FT4 dial
+
+Choose any surrounding button in CTR2 setup and assign:
+
+| Input | Action |
+|---|---|
+| Short press | **FT8/FT4: Switch RX/TX tone** (`adjust_ft8_rx_tx`) |
+| Long press | **FT8/FT4: Set tone frequency** (`set_ft8_frequency`) |
+| Dial | **Selected adjustment (button)** (`selected_adjustment`) |
+
+Short press toggles the adjustment target. On entry RX is the current target,
+so the first short press selects TX. Turn the dial to position its dashed red
+preview marker. Long press commits TX and enables Hold TX. Another short press
+selects RX; turn to position the dashed green marker and long press to set RX.
+My QSO opens automatically, showing decoded audio offsets within ±25 Hz (FT8)
+or ±45 Hz (FT4) of the locked RX frequency plus your TX messages. All continues
+to show the full band. Neither RX preview nor RX commit changes TX.
+
+The solid markers remain at committed frequencies during adjustment. After
+commit, dial movement does nothing until adjustment is selected again. Changing
+target discards its uncommitted preview. TX startup, disconnect, mode/band
+changes and module exit cancel previews. RX frequency focus resets on a band,
+mode or connection change. Selecting a decoded row within the focused window
+keeps that focus; choosing a station outside it returns My QSO to callsign focus.
+
+These are the only two FT8/FT4 button actions. One physical button can provide
+both through short and long press. The separate FT8 RX and FT8 TX actions are
+removed. Saved CTR2 assignments using either retired action are converted to
+Switch RX/TX tone for short press and Set tone frequency for long press;
+other assignments remain unchanged.
+Touch waterfall selection and RF digit
+tuning also remain available. Rate, KHZ, VFO-selection and band-step
+actions are blocked until the user explicitly taps a radio-frequency digit.
+Selecting RX or TX tone disarms those RF actions again. Blocked actions leave
+the tone target, preview, committed frequencies and tone step unchanged.
+Wheel mappings for Selected adjustment, Active VFO frequency and Other VFO
+frequency all follow the module's selected RX/TX tone or explicitly tapped RF
+digit. The RF button guards do not block wheel movement on a selected tone.
+The RX/TX readout opens **FT8/FT4 tone tuning**:
+choose **Select RX tone** or **Select TX tone**, or choose a **Tone step** to
+resume the last tone target. The sheet also provides **Set tone frequency**.
+Tone steps are 1, 5, 10, 25 and 50 Hz, changed deliberately through this sheet.
+Rate and KHZ never change a tone step. Saved 100/1,000 Hz tone steps
+recover to 5 Hz. Explicit RF tuning retains its separate Rate/KHZ behavior.
+No physical button number is hardcoded.
+The actions apply to both FT8 and FT4.
+
+The optional [FT8 sample mapping](QK4-CTR2-FT8-Sample.qk4ctr2map) demonstrates
+Button 6 in Normal mode (notes 6/16) and the Home Wheel A dial. Import replaces
+the entire mapping; edit only the desired assignments to preserve your custom
+map. In Extended mode, each knob mode has separate button assignments.
+
+See [the rollback marker](FT8_CTR2_ROLLBACK.md) for the pre-change checkpoint.
+
 ## Understanding CTR2 modes
 
 CTR2-MIDI has four knob modes: **Home**, **Knob mode 1**, **Knob mode 2**, and
@@ -64,7 +118,10 @@ Home assignments as the 12 shared Normal Button Mode assignments.
 | Button 6 | 6 / 30 | 12 / 36 | 18 / 42 | 24 / 48 |
 
 QK4 executes front-panel button actions when the button is released, matching
-CTR2-MIDI's NoteOn-on-release behavior.
+CTR2-MIDI's positive-velocity NoteOn-on-release behavior. No NoteOff is needed;
+NoteOff and zero-velocity NoteOn do not repeat a front-panel action. See the
+[manufacturer's operation manual](https://ctr2.lynovation.com/wp-content/uploads/2026/02/CTR2-MIDI_Operation_Manual_v20100a.pdf),
+page 17. CW/key/PTT inputs still use both MIDI edges.
 
 ## Knob output formats and directional Button notes
 
@@ -165,6 +222,64 @@ gesture, CC number, selected QK4 action, output format, and its Normal and
 Extended directional notes if the knob is programmed for Button output. The
 file's `_buttonActions`, `_knobActions`, `_knobOutputs`, and guide sections list
 the supported keywords and explain their use.
+
+### Understanding `_buttonActions` and `_knobActions`
+
+All top-level names beginning with an underscore are documentation references;
+QK4 ignores them when loading the file. The actual assignments are the entries
+in the `buttons` and `knobs` arrays.
+
+`_buttonActions` is divided into two named groups so these different behaviors
+are not mixed together:
+
+- Immediate actions such as `band_up`, `nr_toggle`, and `tx_rx_toggle` perform
+  their function when the button is released.
+- Adjustment selectors beginning with `adjust_` do not continuously adjust a
+  setting themselves. They select what a knob will control and open the
+  corresponding QK4 control or feedback where available.
+
+Using adjustment selectors requires at least one knob whose action is
+`selected_adjustment`. This is a behavioral relationship, not a direct pairing
+between a particular MIDI note and CC:
+
+| Actual entry | Action | Role |
+|---|---|---|
+| An entry in `buttons` | `adjust_nr_level` | Select NR when that button is released |
+| An entry in `knobs` | `selected_adjustment` | Control whichever `adjust_*` function was selected most recently |
+
+The entries belong in separate arrays and can appear anywhere in those arrays.
+Their order and proximity in the file have no effect. This complete minimal
+example makes Button 3 select NR and makes the Home knob control the selected
+adjustment:
+
+```json
+{
+    "knobs": [
+        {
+            "controlLabel": "Home turn",
+            "cc": 100,
+            "action": "selected_adjustment",
+            "output": "wheelA"
+        }
+    ],
+    "buttons": [
+        {
+            "buttonLabel": "Button 3",
+            "note": 3,
+            "pressType": "short",
+            "action": "adjust_nr_level"
+        }
+    ]
+}
+```
+
+The operator presses Button 3 to select NR and open its control, then turns the
+Home knob to change the NR level. Pressing a different `adjust_*` button makes
+that same knob control the newly selected function.
+
+For a knob that should always control one setting without first pressing a
+button, use a direct action from `_knobActions`. For example, assigning
+`nr_level` directly to CC105 makes CC105 permanently control NR.
 
 ## Adjustments that open QK4 controls
 

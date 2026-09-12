@@ -169,13 +169,23 @@ void FnPopupWidget::setupButtons() {
                                      {"F7", "F8", MacroIds::FnF7, MacroIds::FnF8},
                                      {"SCRN CAP", "", MacroIds::ScrnCap, ""},
                                      {"SW LIST", "UPDATE", MacroIds::SwList, MacroIds::Update},
-                                     {"DXLIST", "", MacroIds::DxList, ""},
-                                     {"SSTV", "", MacroIds::Sstv, ""}};
+                                     {"DXLIST", "Log", MacroIds::DxList, MacroIds::Log},
+                                     {"FT8/FT4", "SSTV", MacroIds::Ft8, MacroIds::Sstv}};
 
     for (int i = 0; i < buttonDefs.size(); ++i) {
         auto btn = new FnMenuButton(buttonDefs[i].primary, buttonDefs[i].alternate, this);
         btn->setPrimaryFunctionId(buttonDefs[i].primaryId);
         btn->setAlternateFunctionId(buttonDefs[i].alternateId);
+        if (buttonDefs[i].primaryId == MacroIds::DxList) {
+            btn->setObjectName("dxListLogButton");
+            btn->setAccessibleName("DXLIST. Hold for Log.");
+            btn->setToolTip("Tap: DXLIST · Hold: Logbook");
+        }
+        if (buttonDefs[i].primaryId == MacroIds::Ft8) {
+            btn->setObjectName("digitalModesButton");
+            btn->setAccessibleName("FT8 or FT4. Hold for SSTV.");
+            btn->setToolTip("Tap: FT8/FT4 · Hold: SSTV");
+        }
 
         connect(btn, &FnMenuButton::clicked, this, [this, i]() { onButtonClicked(i); });
         connect(btn, &FnMenuButton::rightClicked, this, [this, i]() { onButtonRightClicked(i); });

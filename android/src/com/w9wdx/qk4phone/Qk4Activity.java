@@ -5,11 +5,13 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.content.pm.ActivityInfo;
 import android.os.Bundle;
 import android.os.Build;
 import android.provider.MediaStore;
 import android.net.Uri;
 import android.view.WindowManager;
+import android.view.OrientationEventListener;
 
 import androidx.core.content.FileProvider;
 
@@ -31,6 +33,49 @@ public class Qk4Activity extends QtActivity {
     private boolean sstvCameraPermissionPending;
     private boolean sstvMediaOperationActive;
     private String sstvMediaError;
+    private OrientationEventListener logbookOrientationListener;
+    private boolean radioLogbookActive;
+    private boolean radioLogbookRotationStarted;
+
+    /** Keep the radio's initial landscape presentation until the operator
+     * turns the phone, then allow both orientations for the logbook. */
+    public static void setRadioLogbookRotation(boolean enabled) {
+        Qk4Activity activity = instance;
+        if (activity == null) return;
+        activity.runOnUiThread(() -> {
+            if (activity.logbookOrientationListener != null) {
+                activity.logbookOrientationListener.disable();
+                activity.logbookOrientationListener = null;
+            }
+            activity.radioLogbookActive = enabled;
+            activity.radioLogbookRotationStarted = false;
+            activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+            if (!enabled) return;
+            activity.logbookOrientationListener = new OrientationEventListener(activity) {
+                private int initialQuadrant = -1;
+                @Override public void onOrientationChanged(int angle) {
+                    if (angle == ORIENTATION_UNKNOWN) return;
+                    int quadrant = ((angle + 45) / 90) % 4;
+                    int distance = Math.abs(angle - quadrant * 90);
+                    distance = Math.min(distance, 360 - distance);
+                    if (distance > 25) return; // Ignore diagonal jitter.
+                    if (initialQuadrant < 0) initialQuadrant = quadrant;
+                    if (quadrant != initialQuadrant) {
+                        activity.radioLogbookRotationStarted = true;
+                        activity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);
+                        disable();
+                    }
+                }
+            };
+            activity.logbookOrientationListener.enable();
+        });
+    }
+
+    @Override public void setRequestedOrientation(int requested) {
+        if (radioLogbookActive) requested = radioLogbookRotationStarted
+            ? ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR : ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE;
+        super.setRequestedOrientation(requested);
+    }
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
@@ -73,6 +118,7 @@ public class Qk4Activity extends QtActivity {
 
     @Override
     protected void onDestroy() {
+        if (logbookOrientationListener != null) logbookOrientationListener.disable();
         if (instance == this) {
             instance = null;
         }

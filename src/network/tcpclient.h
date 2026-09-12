@@ -8,6 +8,7 @@
 #include <QElapsedTimer>
 #include <atomic>
 #include "protocol.h"
+#include "audio/digitaltxguard.h"
 
 class TcpClient : public QObject {
     Q_OBJECT
@@ -27,6 +28,8 @@ public:
     bool isUsingTls() const { return m_useTls; }
 
     Q_INVOKABLE void sendCAT(const QString &command);
+    // Send one operator macro, then refresh the full radio/display state.
+    Q_INVOKABLE void sendMacro(const QString &command);
     Q_INVOKABLE void sendRaw(const QByteArray &data);
     // Program SSTV audio has a dedicated gate so a queued callback cannot
     // revive TX after STOP.  Microphone packets continue to use sendRaw().
@@ -34,6 +37,19 @@ public:
     Q_INVOKABLE void sendSstvAudio(const QByteArray &data, int emittedSamples, int totalSamples,
                                    int imageSamples, quint64 generation);
     Q_INVOKABLE void stopSstvAudioAndUnkey();
+    // FT8/FT4 and SSTV must use this guarded lease for generated audio.
+    // mode is DigitalTxGuard::Mode. A fault requires an operator acknowledgement.
+    Q_INVOKABLE void beginDigitalAudioTransmit(int mode, quint64 generation);
+    void beginScheduledDigitalAudio(int mode, quint64 generation);
+    void stopScheduledDigitalAudio(quint64 generation);
+    void confirmScheduledAudioDrained(int emitted, int total, int image, quint64 generation, qint64 deadline);
+    Q_INVOKABLE void acknowledgeDigitalTxFault();
+    Q_INVOKABLE void beginDigitalCalibration(int mode, quint64 generation);
+    Q_INVOKABLE void cancelDigitalCalibration();
+    Q_INVOKABLE void sendDigitalAudio(const QByteArray &data, int emittedSamples, int totalSamples,
+                                      int imageSamples, quint64 generation);
+    Q_INVOKABLE void stopDigitalAudioAndUnkey();
+    std::shared_ptr<DigitalTxControl> digitalTxControl() const { return m_digitalControl; }
 
     Protocol *protocol() { return m_protocol; }
 
@@ -51,6 +67,12 @@ signals:
     void sstvAudioTransmitFailed(const QString &reason, quint64 generation);
     void sstvAudioAccepted(int emittedSamples, int totalSamples, int imageSamples,
                            quint64 generation);
+    void digitalAudioKeyRequested(int mode, quint64 generation);
+    void scheduledDigitalAudioStopped(quint64 generation);
+    void digitalAudioTransmitFailed(int mode, const QString &reason, quint64 generation);
+    void digitalAudioDriveReduced(int mode, float gain, quint64 generation);
+    void digitalTxProtectionStatus(int mode, const QString &text, bool fault, quint64 generation);
+    void digitalCalibrationFinished(int mode, bool success, float gain, const QString &text, quint64 generation);
 
 private slots:
     void onSocketConnected();
@@ -64,6 +86,7 @@ private slots:
     void onAuthTimeout();
     void onPingTimer();
     void onCatResponse(const QString &response);
+    void serviceDigitalTxProtection();
 
 private:
     void setState(ConnectionState state);
@@ -71,6 +94,9 @@ private:
     void startPingTimer();
     void stopPingTimer();
     void attemptConnection();
+    void handleDigitalTxAction(DigitalTxGuard::Action action);
+    void finishDigitalCalibration(bool success, const QString &text);
+    void completeDigitalCalibration();
 
     QSslSocket *m_socket;
     Protocol *m_protocol;
@@ -92,6 +118,19 @@ private:
     bool m_authResponseReceived;
     bool m_sstvAudioGate = false; // I/O-thread only
     quint64 m_sstvAudioGeneration = 0; // I/O-thread only
+    std::shared_ptr<DigitalTxControl> m_digitalControl = std::make_shared<DigitalTxControl>();
+    DigitalTxGuard m_digitalGuard{m_digitalControl};
+    QTimer *m_digitalTimer = nullptr;
+    QElapsedTimer m_digitalClock;
+    qint64 m_nextMeterQuery = 0;
+    enum class CalibrationPhase { None, ReadTest, EnableTest, Running, RestoreTest };
+    CalibrationPhase m_calibrationPhase = CalibrationPhase::None;
+    int m_calibrationMode = 0;
+    quint64 m_calibrationGeneration = 0;
+    bool m_restoreTest = false, m_calibrationSuccess = false;
+    float m_calibrationGain = 0.03125f;
+    QString m_calibrationText;
+    qint64 m_calibrationDeadline = 0;
 };
 
 #endif // TCPCLIENT_H

@@ -1,4 +1,5 @@
 #include "macrodialog.h"
+#include "overlaybackhandler.h"
 #include "k4styles.h"
 #include "../settings/radiosettings.h"
 #include "fnpopupwidget.h"
@@ -224,6 +225,7 @@ void MacroItemWidget::mousePressEvent(QMouseEvent *event) {
 // ============== MacroDialog ==============
 
 MacroDialog::MacroDialog(QWidget *parent) : QWidget(parent) {
+    new OverlayBackHandler(this, [this] { closeDialog(); });
     setWindowFlags(Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground, false);
     setFocusPolicy(Qt::StrongFocus);

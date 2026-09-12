@@ -10,6 +10,7 @@ layout(std140, binding = 0) uniform buf {
     float binCount;       // Actual bin count (passed to fragment shader)
     float textureWidth;   // Texture width (passed to fragment shader)
     float padding;
+    vec4 view; // x=start, y=width within source bins; z/w reserved
 };
 
 void main() {

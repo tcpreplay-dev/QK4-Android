@@ -1,4 +1,5 @@
 #include "menuoverlay.h"
+#include "overlaybackhandler.h"
 #include "k4styles.h"
 #include "inwindowpopup.h"
 #include <QPainter>
@@ -135,6 +136,7 @@ void MenuItemWidget::mousePressEvent(QMouseEvent *event) {
 // ============== MenuOverlayWidget ==============
 
 MenuOverlayWidget::MenuOverlayWidget(MenuModel *model, QWidget *parent) : QWidget(parent), m_model(model) {
+    new OverlayBackHandler(this, [this] { closeOverlay(); });
     setWindowFlags(Qt::FramelessWindowHint);
     setAttribute(Qt::WA_TranslucentBackground, false);
     setFocusPolicy(Qt::StrongFocus);

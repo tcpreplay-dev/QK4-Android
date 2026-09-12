@@ -36,7 +36,6 @@ signals:
     void panelResized(const QSize &size);
 
 protected:
-    void keyPressEvent(QKeyEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
 
 private:
@@ -45,6 +44,7 @@ private:
     QEventLoop *m_eventLoop = nullptr;
     QSize m_preferredPanelSize;
     int m_result = Rejected;
+    bool m_backHidKeyboard = false;
 };
 
 void showInWindowMessage(QWidget *parent, const QString &title, const QString &message);

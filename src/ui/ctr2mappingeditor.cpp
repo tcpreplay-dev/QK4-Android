@@ -364,6 +364,14 @@ Ctr2MappingEditor::Ctr2MappingEditor(Ctr2MidiDevice *device, QWidget *parent)
                                   .arg(K4Styles::Colors::TextGray)
                                   .arg(K4Styles::Dimensions::FontSizeLarge));
     root->addWidget(buttonHelp);
+    auto *ft8Help = new QLabel(
+        "For FT8/FT4, assign Switch RX/TX tone to short press and Set tone frequency to long press. "
+        "Short press chooses the tone. Turn the wheel to move its dashed marker. Long press applies that "
+        "frequency and finishes adjusting. Setting RX focuses My QSO; setting TX enables Hold TX. "
+        "The wheel may use Selected adjustment, Active VFO frequency or Other VFO frequency.", this);
+    ft8Help->setWordWrap(true);
+    ft8Help->setStyleSheet(buttonHelp->styleSheet());
+    root->addWidget(ft8Help);
     m_extendedButtons = new QCheckBox("Extended Button Mode", this);
     root->addWidget(m_extendedButtons);
     auto *extendedButtonHelp = new QLabel(

@@ -3,6 +3,7 @@
 
 #include <QPoint>
 #include <QWidget>
+#include "overlaybackhandler.h"
 
 namespace InWindowPopup {
 
@@ -16,6 +17,7 @@ inline void configure(QWidget *widget) {
     // popups stayed unmapped by default, whereas an ordinary child would be
     // revealed with its parent unless it has an explicit hidden state.
     widget->hide();
+    new OverlayBackHandler(widget);
 #else
     widget->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
 #endif
