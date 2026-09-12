@@ -357,6 +357,8 @@ QStringList supportedButtonActions() {
             QStringLiteral("khz"),
             QStringLiteral("rit_toggle"),    QStringLiteral("split_toggle"),
             QStringLiteral("tx_rx_toggle"),
+            QStringLiteral("adjust_ft8_rx_tx"),
+            QStringLiteral("set_ft8_frequency"),
             QStringLiteral("pan_zoom_in"),   QStringLiteral("pan_zoom_out"),
             QStringLiteral("tune_step"),     QStringLiteral("tune")};
     QStringList adjustments = {
@@ -479,6 +481,8 @@ QString buttonActionLabel(const QString &actionId) {
         {"noise_blanker_toggle", "Noise blanker toggle"},
         {"manual_notch_toggle", "Manual notch toggle"}, {"rit_toggle", "RIT toggle"},
         {"split_toggle", "Split toggle"}, {"tx_rx_toggle", "TX/RX toggle"},
+        {"adjust_ft8_rx_tx", "FT8/FT4: Switch RX/TX tone"},
+        {"set_ft8_frequency", "FT8/FT4: Set tone frequency"},
         {"pan_zoom_in", "Pan zoom in"},
         {"pan_zoom_out", "Pan zoom out"}, {"tune_step", "Rate"}, {"khz", "KHZ"},
         {"tune", "TUNE"},
@@ -644,9 +648,9 @@ QJsonObject toJson(const DeviceMapping &mapping) {
     for (const QString &action : supportedButtonActions()) {
         if (action == QStringLiteral("macro"))
             continue;
-        QJsonObject &group = knobActionForButtonAction(action).isEmpty()
-                                 ? immediateButtonActions
-                                 : adjustmentSelectorButtonActions;
+        QJsonObject &group = action.startsWith(QStringLiteral("adjust_"))
+                                 ? adjustmentSelectorButtonActions
+                                 : immediateButtonActions;
         group.insert(action, buttonActionLabel(action));
     }
     QJsonObject buttonActionReference;
@@ -808,7 +812,14 @@ bool fromJson(const QJsonObject &root, DeviceMapping *mapping, QString *error) {
     for (const QJsonValue &value : root.value(QStringLiteral("buttons")).toArray()) {
         const QJsonObject entry = value.toObject();
         const int note = entry.value(QStringLiteral("note")).toInt(-1);
-        const QString actionId = entry.value(QStringLiteral("action")).toString();
+        QString actionId = entry.value(QStringLiteral("action")).toString();
+        // Migrate retired tone selectors into the two-action workflow. CTR2
+        // short presses select RX/TX; long presses apply the preview.
+        if (actionId == QStringLiteral("ft8_rx") || actionId == QStringLiteral("ft8_tx")) {
+            const bool longPress = parsed.profile == Profile::Ctr2 &&
+                ctr2ButtonDescriptor(parsed.extendedButtons, note).pressType == QStringLiteral("long");
+            actionId = longPress ? QStringLiteral("set_ft8_frequency") : QStringLiteral("adjust_ft8_rx_tx");
+        }
         const QString macroId = entry.value(QStringLiteral("macro")).toString();
         if (note < 0 || note > 127 || !isSupportedButtonAction(actionId) ||
             (actionId == QStringLiteral("macro") && macroId.isEmpty()))

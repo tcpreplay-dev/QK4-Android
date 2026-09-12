@@ -1,4 +1,5 @@
 #include "mainwindow.h"
+#include "ui/overlaybackhandler.h"
 #include "ui/radiomanagerdialog.h"
 #include "ui/sidecontrolpanel.h"
 #include "ui/rightsidepanel.h"
@@ -19,6 +20,7 @@
 #include "ui/filterindicatorwidget.h"
 #include "ui/k4styles.h"
 #include "ui/inwindowdialog.h"
+#include "ui/digitalaudiosetupdialog.h"
 #include "ui/inwindowpopup.h"
 #include "ui/antennacfgpopup.h"
 #include "ui/lineoutpopup.h"
@@ -34,6 +36,11 @@
 #include "ui/softwarelistpopup.h"
 #include "ui/dxprefixlistdialog.h"
 #include "ui/sstvscreen.h"
+#include "ui/ft8screen.h"
+#include "ui/logbookdialog.h"
+#include "ft8/qrzlogbook.h"
+#include "ft8/ft8receiver.h"
+#include "ft8/ft8transmitter.h"
 #include "ui/textdecodewindow.h"
 #include "ui/frequencydisplaywidget.h"
 #include "ui/frequencyentryparser.h"
@@ -78,6 +85,8 @@
 #include <QResizeEvent>
 #include <QRegularExpression>
 #include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
 #include <QJsonParseError>
 #include <QMouseEvent>
 #include <algorithm>
@@ -247,7 +256,6 @@ QString temperatureStyle(int celsius) {
 // changing over; do not make transmission depend on a CAT state echo.
 constexpr int SstvKeyUpGuardMs = 500;
 constexpr int SstvDrainMarginMs = 150;
-constexpr int SstvAlcWarningLevel = 5;
 } // namespace
 
 // Convert K4 tuning step index (VT command, 0-5) to Hz
@@ -313,6 +321,115 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), m_tcpClient(new TcpClient(nullptr)), m_radioState(new RadioState(this)),
       m_clockTimer(new QTimer(this)), m_audioEngine(new AudioEngine(nullptr)), m_opusDecoder(new OpusDecoder(nullptr)),
       m_menuModel(new MenuModel(this)), m_menuOverlay(nullptr) {
+    QrzLogbook::start(LogbookUi::storagePath(), this);
+    m_audioEngine->setDigitalTxControl(m_tcpClient->digitalTxControl());
+    m_ft8Transmitter = new Ft8Transmitter(m_tcpClient->digitalTxControl(), m_audioEngine);
+    connect(m_ft8Transmitter, &Ft8Transmitter::keyRequested, m_tcpClient, &TcpClient::beginScheduledDigitalAudio);
+    connect(m_ft8Transmitter, &Ft8Transmitter::unkeyRequested, m_tcpClient, &TcpClient::stopScheduledDigitalAudio);
+    connect(m_tcpClient, &TcpClient::digitalAudioKeyRequested, m_ft8Transmitter, &Ft8Transmitter::keyed);
+    connect(m_tcpClient, &TcpClient::sstvAudioAccepted, m_ft8Transmitter, &Ft8Transmitter::accepted);
+    connect(m_tcpClient, &TcpClient::scheduledDigitalAudioStopped, m_ft8Transmitter, &Ft8Transmitter::unkeyed);
+    connect(m_ft8Transmitter, &Ft8Transmitter::encodingStarted, m_audioEngine, &AudioEngine::beginFt8Encoding);
+    connect(m_ft8Transmitter, &Ft8Transmitter::frameReady, m_audioEngine, &AudioEngine::encodeFt8Frame);
+    connect(m_ft8Transmitter, &Ft8Transmitter::finished, m_audioEngine,
+            [this](bool, const QString &, quint64 gen) { m_audioEngine->finishFt8Encoding(gen); });
+    connect(m_ft8Transmitter, &Ft8Transmitter::transmitting, this, [this](quint64 gen) {
+        if (gen == m_ft8TxGeneration && m_ft8Screen) m_ft8Screen->liveTransmitting();
+    });
+    connect(m_ft8Transmitter, &Ft8Transmitter::finished, this,
+            [this](bool success, const QString &reason, quint64 gen) {
+        if (gen != m_ft8TxGeneration) return;
+        auto expected = gen;
+        m_tcpClient->digitalTxControl()->scheduledGeneration.compare_exchange_strong(expected, 0);
+        m_ft8TxGeneration = 0;
+        if (m_ft8Screen) m_ft8Screen->finishLiveTransmit(success, reason);
+        refreshFt8Capture();
+        qInfo() << "FT TX finished" << gen << success << reason;
+    });
+    connect(m_tcpClient, &TcpClient::digitalAudioTransmitFailed, m_ft8Transmitter,
+            [this](int, const QString &, quint64 gen) { m_ft8Transmitter->cancel(gen); });
+    auto *ft8SettingsGuard = new QTimer(this);
+    ft8SettingsGuard->setInterval(100);
+    connect(ft8SettingsGuard, &QTimer::timeout, this, [this] {
+        updateFt8RadioMode();
+        if (!m_ft8TxGeneration) return;
+        if (!m_tcpClient->isConnected() || m_radioState->splitEnabled() || m_radioState->testMode()
+            || qint64(m_radioState->vfoA()) != m_ft8TransmitFrequency
+            || DigitalTxCalibration::matchingContext(digitalCalibrationContext(int(m_ft8Screen->mode())))
+                != DigitalTxCalibration::matchingContext(m_ft8TransmitContext)) {
+            stopFt8Transmit();
+            m_ft8Screen->setTransmitProtection("TX halted: radio settings changed. Check TX audio setup.", true);
+        }
+    });
+    ft8SettingsGuard->start();
+    connect(m_tcpClient, &TcpClient::disconnected, this, &MainWindow::stopFt8Transmit);
+    connect(m_tcpClient, &TcpClient::disconnected, this, [this] { m_ft8RadioMode.connectionLost(); });
+    connect(m_radioState, &RadioState::transmitStateChanged, this, [this](bool transmitting) {
+        if (!transmitting && m_ft8TxGeneration && m_tcpClient->digitalTxControl()->allows(m_ft8TxGeneration))
+            stopFt8Transmit();
+    });
+    connect(m_tcpClient, &TcpClient::digitalAudioDriveReduced, this,
+            [this](int mode, float gain, quint64 generation) {
+        if (!m_digitalCalibrating && mode == int(DigitalTxGuard::Mode::Sstv)
+            && generation == m_sstvGeneration && !m_sstvTransmitContext.isEmpty())
+            m_digitalReducedGains.insert(DigitalTxCalibration::matchingContext(m_sstvTransmitContext), gain);
+        if (generation == m_ft8TxGeneration && !m_ft8TransmitContext.isEmpty())
+            m_digitalReducedGains.insert(DigitalTxCalibration::matchingContext(m_ft8TransmitContext), gain);
+    });
+    connect(m_audioEngine, &AudioEngine::digitalCalibrationPreparationFailed, this,
+            [this](const QString &reason, quint64 generation) {
+        if (!m_digitalCalibrating || generation != m_digitalCalibrationGeneration) return;
+        cancelDigitalCalibration();
+        showDigitalProtection(m_digitalCalibrationMode, reason, true);
+    });
+    connect(m_tcpClient, &TcpClient::digitalTxProtectionStatus, this,
+            [this](int mode, const QString &text, bool fault, quint64 generation) {
+        if ((m_digitalCalibrating && generation == m_digitalCalibrationGeneration)
+            || (mode == int(DigitalTxGuard::Mode::Sstv) && generation == m_sstvGeneration))
+            showDigitalProtection(mode, text, fault);
+        else if (generation == m_ft8TxGeneration && m_ft8Screen)
+            m_ft8Screen->setTransmitProtection(text, fault);
+    });
+    connect(m_audioEngine, &AudioEngine::digitalCalibrationPrepared, this, [this](quint64 generation) {
+        if (m_digitalCalibrating && generation == m_digitalCalibrationGeneration) {
+            m_digitalCalibrationStarted = true;
+            m_tcpClient->beginDigitalCalibration(m_digitalCalibrationMode, generation);
+        }
+    });
+    connect(m_tcpClient, &TcpClient::digitalAudioKeyRequested, this, [this](int, quint64 generation) {
+        if (!m_digitalCalibrating || generation != m_digitalCalibrationGeneration) return;
+        QTimer::singleShot(SstvKeyUpGuardMs, this, [this, generation] {
+            if (m_digitalCalibrating && generation == m_digitalCalibrationGeneration)
+                QMetaObject::invokeMethod(m_audioEngine, "beginSstvTransmit", Qt::QueuedConnection);
+        });
+    });
+    connect(m_tcpClient, &TcpClient::digitalCalibrationFinished, this,
+            [this](int mode, bool success, float gain, QString text, quint64 generation) {
+        if (!m_digitalCalibrating || generation != m_digitalCalibrationGeneration) return;
+        m_audioEngine->requestSstvStop();
+        QMetaObject::invokeMethod(m_audioEngine, "stopSstvTransmit", Qt::QueuedConnection);
+        if (success && DigitalTxCalibration::matchingContext(digitalCalibrationContext(mode))
+                != DigitalTxCalibration::matchingContext(m_digitalCalibrationContext)) {
+            success = false;
+            text = "Calibration not saved: radio settings changed. Previous saved level retained.";
+        }
+        if (success) {
+            QSettings settings("QK4", "QK4");
+            if (!DigitalTxCalibration::save(settings, m_digitalCalibrationContext, gain)) {
+                success = false;
+                text = "Calibration finished but could not be saved. Check app storage.";
+            } else
+                m_digitalReducedGains.insert(DigitalTxCalibration::matchingContext(m_digitalCalibrationContext), gain);
+        }
+        m_digitalCalibrating = false;
+        qInfo() << "Digital TX calibration result" << success << "gain" << gain << text;
+        showDigitalProtection(mode, text, !success);
+        refreshFt8Capture();
+        if (m_sstvScreen && m_sstvScreen->isVisible()) {
+            m_sstvRxArmed.store(true, std::memory_order_release);
+            QMetaObject::invokeMethod(m_sstvDecoder, "resetAuto", Qt::QueuedConnection);
+        }
+    });
     // Initialize Opus decoder (K4 sends 12kHz stereo: left=Main, right=Sub)
     m_opusDecoder->initialize(12000, 2);
 
@@ -345,6 +462,15 @@ MainWindow::MainWindow(QWidget *parent)
     m_sstvDecoder->moveToThread(m_sstvDecoderThread);
     m_sstvDecoderThread->start();
 
+    qRegisterMetaType<Ft8::Decode>();
+    qRegisterMetaType<QVector<Ft8::Decode>>();
+    m_ft8Receiver = new Ft8Receiver;
+    m_ft8Thread = new QThread(this);
+    m_ft8Thread->setObjectName("FT8 FT4 Receiver");
+    m_ft8Receiver->moveToThread(m_ft8Thread);
+    connect(m_ft8Thread, &QThread::finished, m_ft8Receiver, &QObject::deleteLater);
+    m_ft8Thread->start();
+
     // Move TcpClient (+ Protocol, socket, timers as children) to dedicated I/O thread
     // so network data flows independently of UI work
     m_ioThread = new QThread(this);
@@ -365,6 +491,12 @@ MainWindow::MainWindow(QWidget *parent)
             m_sstvScreen->flushDraft();
         if (state != Qt::ApplicationActive && (m_sstvTxActive || m_sstvTxStarting))
             stopSstvTransmission();
+        if (state != Qt::ApplicationActive)
+            cancelDigitalCalibration();
+        if (m_ft8Screen) {
+            if (state != Qt::ApplicationActive) m_ft8Screen->suspend();
+            refreshFt8Capture();
+        }
     });
 
     // Phone replacement for hovering over RIT/XIT and rolling a mouse wheel.
@@ -1548,17 +1680,6 @@ MainWindow::MainWindow(QWidget *parent)
 
     // TX Meter data -> update power displays and VFO multifunction meters during TX
     connect(m_radioState, &RadioState::txMeterChanged, this, [this](int alc, int comp, double fwdPower, double swr) {
-        if (m_sstvTxActive) {
-            m_sstvPeakAlc = qMax(m_sstvPeakAlc, alc);
-            if (alc >= SstvAlcWarningLevel && !m_sstvAlcWarningShown) {
-                m_sstvAlcWarningShown = true;
-                if (m_sstvScreen) {
-                    m_sstvScreen->setTransmitWarning(
-                        QStringLiteral("ALC HIGH %1 • REDUCE K4 DATA/LINE INPUT LEVEL BELOW 5").arg(alc));
-                }
-            }
-        }
-
         // Update status bar power label
         QString powerStr;
         if (fwdPower < 10.0) {
@@ -2226,6 +2347,7 @@ MainWindow::MainWindow(QWidget *parent)
             [this](const QByteArray &payload) {
                 QByteArray pcmData = m_opusDecoder->decodeK4Packet(payload);
                 if (!pcmData.isEmpty()) {
+                    m_ft8Receiver->enqueue(pcmData, QDateTime::currentMSecsSinceEpoch());
                     if (m_sstvRxArmed.load(std::memory_order_acquire)) {
                         QMetaObject::invokeMethod(m_sstvDecoder, "consumeStereoFloat", Qt::QueuedConnection,
                                                   Q_ARG(QByteArray, pcmData));
@@ -2505,12 +2627,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_catServer, &CatServer::catCommandReceived, this,
             [this](const QString &command) {
         const QString normalized = command.trimmed().toUpper();
-        if (m_sstvTxActive || m_sstvTxStarting) {
+        if (m_sstvTxActive || m_sstvTxStarting || m_digitalCalibrating || m_ft8TxGeneration) {
             // SSTV exclusively owns TX. Do not let the generic CAT forwarder
             // bypass the pttRequested guard below.
             if (normalized.startsWith(QStringLiteral("TX")))
                 return;
             if (normalized.startsWith(QStringLiteral("RX"))) {
+                stopFt8Transmit();
+                cancelDigitalCalibration();
                 stopSstvTransmission();
                 return;
             }
@@ -2521,7 +2645,7 @@ MainWindow::MainWindow(QWidget *parent)
     // TX;/RX; from external apps controls audio input gate
     // Audio stream itself triggers K4 TX - timing-critical for FT8/FT4
     connect(m_catServer, &CatServer::pttRequested, this, [this](bool on) {
-        if (on && (m_sstvTxActive || m_sstvTxStarting))
+        if (on && (m_sstvTxActive || m_sstvTxStarting || m_digitalCalibrating || m_ft8TxGeneration))
             return;
         // Match AudioController in mainline: reject PTT-on while disconnected,
         // but always honor PTT-off so a stale gate can be cleared.
@@ -2570,6 +2694,8 @@ MainWindow::MainWindow(QWidget *parent)
 }
 
 MainWindow::~MainWindow() {
+    stopFt8Transmit();
+    m_ft8Receiver->setCapture(false, Ft8::Mode::FT8);
     // SSTV owns a keyed program-audio path. Close its producer before the
     // network connection is torn down so shutdown cannot leave a queued tone
     // stream or a keyed K4 behind.
@@ -2616,6 +2742,11 @@ MainWindow::~MainWindow() {
     }
     delete m_tcpClient;   // No parent, must delete manually
     delete m_opusDecoder; // No parent, must delete manually
+
+    // The I/O producer is stopped before its FT8 consumer is destroyed.
+    m_ft8Thread->requestInterruption();
+    m_ft8Thread->quit();
+    m_ft8Thread->wait();
 
     // Shut down sidetone thread
     if (m_sidetoneThread) {
@@ -2677,6 +2808,8 @@ void MainWindow::setupMenuBar() {
 }
 
 void MainWindow::showSettings() {
+    closeAllPopups();
+    if (m_phoneControlsDialog) m_phoneControlsDialog->hide();
     if (!m_optionsDialog) {
         m_optionsDialog = new OptionsDialog(m_radioState, m_audioEngine, m_kpodDevice, m_catServer,
                                             m_halikeyDevice, m_ctr2MidiDevice, centralWidget());
@@ -4915,8 +5048,12 @@ void MainWindow::setupSpectrumPlaceholder(QWidget *parent) {
         // Guard: only send if connected and frequency is valid
         if (!m_tcpClient->isConnected() || freq <= 0)
             return;
-        // L=A R=B mode: left-click on Pan B tunes VFO A
+        // Touch input on Pan B always tunes VFO B. Desktop mouse behavior follows the radio setting.
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+        QString vfo = QStringLiteral("FB");
+#else
         QString vfo = (m_mouseQsyMode == 1) ? "FA" : "FB";
+#endif
         QString cmd = QString("%1%2;").arg(vfo).arg(freq, 11, 10, QChar('0'));
         m_tcpClient->sendCAT(cmd);
         m_tcpClient->sendCAT(vfo + ";");
@@ -4928,8 +5065,12 @@ void MainWindow::setupSpectrumPlaceholder(QWidget *parent) {
         // Guard: only send if connected and frequency is valid
         if (!m_tcpClient->isConnected() || freq <= 0)
             return;
-        // L=A R=B mode: left-drag on Pan B tunes VFO A
+        // Touch input on Pan B always tunes VFO B. Desktop mouse behavior follows the radio setting.
+#if defined(Q_OS_ANDROID) || defined(Q_OS_IOS)
+        bool tuneA = false;
+#else
         bool tuneA = (m_mouseQsyMode == 1);
+#endif
         QString vfo = tuneA ? "FA" : "FB";
         int stepHz = tuneA ? (m_phoneTuneStepAHz > 0 ? m_phoneTuneStepAHz : tuningStepToHz(m_radioState->tuningStep()))
                            : (m_phoneTuneStepBHz > 0 ? m_phoneTuneStepBHz : tuningStepToHz(m_radioState->tuningStepB()));
@@ -5244,23 +5385,9 @@ void MainWindow::onAuthenticated() {
         qWarning() << "Failed to start audio engine";
     }
 
-    // Most state is already included in the RDY; response from TcpClient.
-    // Only query commands NOT included in RDY dump:
-    m_tcpClient->sendCAT("#DSM;");  // Display mode (LCD) - not in RDY
-    m_tcpClient->sendCAT("#HDSM;"); // Display mode (EXT) - not in RDY
-    m_tcpClient->sendCAT("#PKM;");  // Peak trace - synchronize local renderer
-    m_tcpClient->sendCAT("#AR;");   // Auto reference-level mode
-    m_tcpClient->sendCAT("#NB$;");  // DDC/panadapter noise-blanker mode
-    m_tcpClient->sendCAT("#NBL$;"); // DDC/panadapter noise-blanker level
-    m_tcpClient->sendCAT("#FRZ;");  // Freeze - not in RDY
-    m_tcpClient->sendCAT("#FPS;");  // Display FPS - not in RDY
-    m_tcpClient->sendCAT("#SCL;");  // Panadapter scale - not in RDY, needed for dB range
-    m_tcpClient->sendCAT("RT$;");   // VFO B RIT state - needed for B SET and touch offset control
-    m_tcpClient->sendCAT("RO$;");   // VFO B offset - used by split XIT and B SET RIT
-    m_tcpClient->sendCAT("VT;VT$;"); // Both VFO tuning rates - required by external frequency controls
-    m_tcpClient->sendCAT("KP;");    // Paddle N/R orientation - mirror into local CW mapping
-    m_tcpClient->sendCAT("PL;PL$;"); // FM PL/CTCSS state for both VFOs
-    m_tcpClient->sendCAT("RP;");    // FM repeater mode and offset
+    // RDY supplies most state. Share supplemental GETs with macro refresh so
+    // display, VFO rates, paddle orientation and FM controls stay in sync.
+    m_tcpClient->sendCAT(K4Protocol::Commands::ADDITIONAL_STATE_QUERIES);
     m_tcpClient->sendCAT("SIRC1;"); // Enable 1-second client stats updates
     // Note: ML commands (monitor levels) come in RDY; dump - no need to query
 
@@ -6275,6 +6402,7 @@ void MainWindow::showPhoneControls() {
         // them as a bottom drawer.  The live VFO/filter/status area remains
         // visible above the drawer while the operator changes the radio.
         m_phoneControlsDialog = new QWidget(this);
+        new OverlayBackHandler(m_phoneControlsDialog);
         m_phoneControlsDialog->setObjectName("phoneControlsOverlay");
         m_phoneControlsDialog->setAttribute(Qt::WA_StyledBackground, true);
         m_phoneControlsDialog->setStyleSheet(
@@ -6595,8 +6723,9 @@ void MainWindow::showFrequencyEntry(bool vfoB) {
 }
 
 void MainWindow::onPttPressed() {
-    if (m_sstvTxActive || m_sstvTxStarting) {
-        showControlFeedback("SSTV TRANSMIT ACTIVE — USE STOP SSTV");
+    if (m_sstvTxActive || m_sstvTxStarting || m_digitalCalibrating || m_ft8TxGeneration) {
+        showControlFeedback(m_ft8TxGeneration ? "FT8/FT4 TRANSMIT ACTIVE · USE HALT TX"
+                                            : "DIGITAL TRANSMIT ACTIVE · USE STOP");
         return;
     }
     if (!m_tcpClient->isConnected()) {
@@ -6623,6 +6752,7 @@ void MainWindow::onPttPressed() {
 }
 
 void MainWindow::onPttReleased() {
+    stopFt8Transmit();
     // Always release the K4 first, including after a partial TX start.  The
     // separate audio gate is then closed so no more microphone frames follow.
     if (m_tcpClient && m_tcpClient->isConnected())
@@ -6836,6 +6966,7 @@ void MainWindow::resizeEvent(QResizeEvent *event) {
     if (m_sstvScreen && m_sstvScreen->isVisible()) {
         m_sstvScreen->setGeometry(rect());
     }
+    if (m_ft8Screen && m_ft8Screen->isVisible()) m_ft8Screen->setGeometry(rect());
     updatePhoneTxInputShieldGeometry();
 }
 
@@ -7407,7 +7538,9 @@ void MainWindow::onFnFunctionTriggered(const QString &functionId) {
     qDebug() << "Fn function triggered:" << functionId;
 
     // Handle built-in functions
-    if (functionId == MacroIds::Sstv) {
+    if (functionId == MacroIds::Ft8) {
+        openFt8Screen();
+    } else if (functionId == MacroIds::Sstv) {
         openSstvScreen();
     } else if (functionId == MacroIds::ScrnCap) {
         // SS0; triggers K4 screenshot (saved to internal SD card)
@@ -7427,13 +7560,181 @@ void MainWindow::onFnFunctionTriggered(const QString &functionId) {
     } else if (functionId == MacroIds::DxList) {
         closeAllPopups();
         showDxPrefixList(centralWidget());
+    } else if (functionId == MacroIds::Log) {
+        openLogbook();
     } else {
         // User-configurable macro - execute CAT command
         executeMacro(functionId);
     }
 }
 
+QString MainWindow::ft8TransmitReadiness() const {
+    if (!m_tcpClient->isConnected()) return "Connect to the K4 before transmitting.";
+    if (m_pttActive || m_radioState->isTransmitting() || m_sstvTxActive || m_sstvTxStarting || m_digitalCalibrating || m_ft8TxGeneration)
+        return "Wait for the current transmission or calibration to finish.";
+    if (m_radioState->testMode()) return "Turn K4 TEST off to transmit on air.";
+    if (m_radioState->splitEnabled()) return "Turn split off for FT8/FT4 transmission.";
+    if (m_radioState->modeStringFull() != "DATA") return "Select DATA-A mode before transmitting FT8/FT4.";
+    QSettings settings("QK4", "QK4");
+    if (!DigitalTxCalibration::load(settings, digitalCalibrationContext(int(m_ft8Screen->mode()))))
+        return "Calibrate TX audio for this radio setup first (Options → TX audio setup).";
+    return {};
+}
+void MainWindow::startFt8Transmit(const QString &message, int mode, int hz, qint64 slotUtc) {
+    const auto reason = ft8TransmitReadiness();
+    if (!reason.isEmpty() || m_ft8TxGeneration) {
+        m_ft8Screen->finishLiveTransmit(false, reason.isEmpty() ? "FT transmission already active." : reason);
+        return;
+    }
+    m_ft8TransmitContext = digitalCalibrationContext(mode);
+    m_ft8TransmitFrequency = m_radioState->vfoA();
+    QSettings settings("QK4", "QK4");
+    const auto gain = DigitalTxCalibration::load(settings, m_ft8TransmitContext);
+    if (!gain) { m_ft8Screen->finishLiveTransmit(false, "TX calibration is unavailable."); return; }
+    const auto gen = m_ft8TxGeneration = ++m_sstvGeneration;
+    auto control = m_tcpClient->digitalTxControl();
+    control->gain.store(qMin(*gain, m_digitalReducedGains.value(DigitalTxCalibration::matchingContext(m_ft8TransmitContext), *gain)));
+    control->scheduledGeneration.store(gen);
+    const int frameSamples = streamingLatencyToFrameSamples(m_currentRadio.streamingLatency);
+    QMetaObject::invokeMethod(m_ft8Transmitter, [this, message, mode, hz, slotUtc, frameSamples, gen] {
+        m_ft8Transmitter->schedule(message, mode, hz, slotUtc, frameSamples, gen);
+    }, Qt::QueuedConnection);
+}
+void MainWindow::stopFt8Transmit() {
+    if (!m_ft8TxGeneration) return;
+    const auto gen = m_ft8TxGeneration;
+    auto expected = gen;
+    m_tcpClient->digitalTxControl()->scheduledGeneration.compare_exchange_strong(expected, 0);
+    m_tcpClient->digitalTxControl()->close(gen);
+    QMetaObject::invokeMethod(m_ft8Transmitter, [this, gen] { m_ft8Transmitter->cancel(gen); }, Qt::QueuedConnection);
+    QMetaObject::invokeMethod(m_tcpClient, [this, gen] { m_tcpClient->stopScheduledDigitalAudio(gen); }, Qt::QueuedConnection);
+}
+void MainWindow::refreshFt8Capture() {
+    const bool enabled = m_ft8Screen && m_ft8Screen->receiving()
+        && m_tcpClient->isConnected() && !m_radioState->isTransmitting()
+        && !m_sstvTxActive && !m_sstvTxStarting && !m_digitalCalibrating
+        && QGuiApplication::applicationState() == Qt::ApplicationActive;
+    m_ft8Receiver->setCapture(enabled, m_ft8Screen ? m_ft8Screen->mode() : Ft8::Mode::FT8);
+}
+
+void MainWindow::updateFt8RadioMode() {
+    const auto command = m_ft8RadioMode.update(m_tcpClient->isConnected(), int(m_radioState->mode()),
+        m_radioState->dataSubMode(), m_radioState->isTransmitting() || m_pttActive || m_ft8TxGeneration
+            || m_sstvTxActive || m_sstvTxStarting || m_digitalCalibrating);
+    if (!command.isEmpty()) m_tcpClient->sendCAT(command);
+}
+void MainWindow::openFt8Screen() {
+    if (m_sstvTxActive || m_sstvTxStarting || m_pttActive || m_radioState->isTransmitting()) {
+        showControlFeedback("Stop transmission before opening FT8/FT4");
+        return;
+    }
+    closeAllPopups();
+    m_ft8RadioMode.enter();
+    updateFt8RadioMode();
+    m_sstvRxArmed.store(false, std::memory_order_release);
+    if (m_sstvScreen) m_sstvScreen->hide();
+    if (!m_ft8Screen) {
+        m_ft8Screen = new Ft8Screen(this);
+        connect(m_ft8Screen, &Ft8Screen::liveArmRequested, this, [this] {
+            const auto reason = ft8TransmitReadiness();
+            if (!reason.isEmpty()) m_ft8Screen->setTransmitProtection(reason, true);
+            else {
+                m_tcpClient->acknowledgeDigitalTxFault(); // Explicit operator Call/CQ only.
+                m_ft8Screen->setTransmitProtection("TX armed · calibrated audio protection active", false);
+            }
+        });
+        connect(m_ft8Screen, &Ft8Screen::liveTransmitRequested, this, &MainWindow::startFt8Transmit);
+        connect(m_ft8Screen, &Ft8Screen::liveStopRequested, this, &MainWindow::stopFt8Transmit);
+        connect(m_panadapterA, &PanadapterRhiWidget::waterfallAppearanceChanged,
+                m_ft8Screen, &Ft8Screen::setWaterfallAppearance);
+        connect(m_ft8Screen, &Ft8Screen::closeRequested, this, [this] {
+            m_ft8Screen->suspend();
+            m_ft8Screen->hide();
+            m_ft8RadioMode.leave();
+            updateFt8RadioMode();
+            refreshFt8Capture();
+            setFt8PortraitEnabled(false);
+            if (centralWidget()) centralWidget()->show();
+        });
+        connect(m_ft8Screen, &Ft8Screen::captureChanged, this, [this] {
+            // Explicit screen changes (including retuning within the same
+            // mode) discard the old slot. Routine readiness refreshes do not.
+            m_ft8Receiver->setCapture(false, m_ft8Screen->mode());
+            refreshFt8Capture();
+        });
+        connect(m_ft8Screen, &Ft8Screen::audioSetupRequested, this, [this] {
+            showDigitalAudioSetup(m_ft8Screen->mode() == Ft8::Mode::FT4 ? int(DigitalTxGuard::Mode::Ft4)
+                                                                      : int(DigitalTxGuard::Mode::Ft8), m_ft8Screen);
+        });
+        connect(m_ft8Screen, &Ft8Screen::powerRequested, this, [this](double watts) {
+            if (!m_ft8Screen->practice() && !m_pttActive && !m_radioState->isTransmitting())
+                setSstvRfPower(watts); // Reuse the established digital-module PC command path.
+        });
+        connect(m_radioState, &RadioState::rfPowerChanged, m_ft8Screen,
+                [this](double watts, bool) { m_ft8Screen->setRfPower(watts); });
+        connect(m_ft8Screen, &Ft8Screen::frequencyRequested, this, [this](qint64 hz) {
+            if (m_tcpClient->isConnected() && !m_radioState->isTransmitting()
+                && !m_sstvTxActive && !m_sstvTxStarting)
+                m_tcpClient->sendCAT(QString("FA%1;FA;").arg(hz, 11, 10, QChar('0')));
+        });
+        const auto updateRadio = [this] {
+            m_ft8Screen->setRadioState(m_tcpClient->isConnected(), qint64(m_radioState->vfoA()),
+                                       m_radioState->modeStringFull(), m_radioState->isTransmitting());
+            m_ft8Screen->setRfPower(m_radioState->rfPower());
+        };
+        connect(m_radioState, &RadioState::frequencyChanged, m_ft8Screen, updateRadio);
+        connect(m_radioState, &RadioState::modeChanged, m_ft8Screen, updateRadio);
+        connect(m_radioState, &RadioState::dataSubModeChanged, m_ft8Screen, updateRadio);
+        connect(m_radioState, &RadioState::transmitStateChanged, m_ft8Screen, updateRadio);
+        connect(m_tcpClient, &TcpClient::stateChanged, m_ft8Screen, updateRadio);
+        connect(m_ft8Receiver, &Ft8Receiver::decoded, m_ft8Screen,
+                [this](const QVector<Ft8::Decode> &messages, quint64 generation) {
+            if (generation == m_ft8Receiver->generation() && m_ft8Screen->receiving()) m_ft8Screen->addDecodes(messages);
+        });
+        connect(m_ft8Receiver, &Ft8Receiver::spectrum, m_ft8Screen,
+                [this](const QVector<float> &db, double firstHz, double binHz, quint64 generation) {
+            if (generation == m_ft8Receiver->generation() && m_ft8Screen->receiving()) m_ft8Screen->addSpectrum(db, firstHz, binHz);
+        });
+        connect(m_ft8Receiver, &Ft8Receiver::streamStatus, m_ft8Screen,
+                [this](const QString &status, quint64 generation) {
+            if (generation == m_ft8Receiver->generation()) m_ft8Screen->setReceiveStatus(status);
+        });
+    }
+    m_ft8Screen->setRadioState(m_tcpClient->isConnected(), qint64(m_radioState->vfoA()),
+                               m_radioState->modeStringFull(), m_radioState->isTransmitting());
+    m_ft8Screen->setRfPower(m_radioState->rfPower());
+    if (centralWidget()) centralWidget()->hide();
+    m_ft8Screen->setWaterfallAppearance(m_panadapterA->waterfallColor(), m_panadapterA->waterfallColorRange());
+    m_ft8Screen->selectDialTarget(Ft8Screen::DialTarget::RxAudio);
+    m_ft8Screen->setGeometry(rect());
+    m_ft8Screen->show(); m_ft8Screen->raise(); m_ft8Screen->setFocus();
+    setFt8PortraitEnabled(true);
+    QTimer::singleShot(250, this, [this] {
+        if (m_ft8Screen->isVisible()) setFt8PortraitEnabled(true);
+    });
+    refreshFt8Capture();
+}
+
+void MainWindow::openLogbook(bool fromSstv) {
+    closeAllPopups();
+    Ft8Logbook log(LogbookUi::storagePath());
+    QSettings settings("QK4", "QK4");
+    auto defaults = LogbookUi::contact({}, fromSstv ? "SSTV" : m_radioState->modeStringFull(),
+        qint64(m_radioState->vfoA()), fromSstv ? m_sstvScreen->operatorCallsign()
+                                            : settings.value("ft8/call").toString());
+    defaults["MY_GRIDSQUARE"] = settings.value("ft8/grid").toString();
+    if (!fromSstv) setRadioLogbookOrientationEnabled(true);
+    LogbookUi::show(fromSstv ? static_cast<QWidget *>(m_sstvScreen) : this, log, defaults);
+    if (!fromSstv) setRadioLogbookOrientationEnabled(false);
+}
 void MainWindow::openSstvScreen() {
+    if (m_ft8Screen) {
+        m_ft8Screen->suspend();
+        m_ft8Screen->hide();
+        m_ft8RadioMode.leave();
+        updateFt8RadioMode();
+        refreshFt8Capture();
+    }
     closeAllPopups();
     if (!m_sstvScreen) {
         // SSTV is an application screen, not a console overlay. Parent it to
@@ -7441,6 +7742,22 @@ void MainWindow::openSstvScreen() {
         // child rather than inheriting the central console's rounded/inset
         // surface and exposing sibling widgets at the edges.
         m_sstvScreen = new SstvScreen(this);
+        connect(m_sstvScreen, &SstvScreen::logbookRequested, this, [this] { openLogbook(true); });
+        connect(m_sstvScreen, &SstvScreen::logQsoRequested, this,
+                [this](const QString &call, bool transmit, qint64 receivedHz, const QDateTime &receivedUtc) {
+            const qint64 frequency = !transmit && receivedHz > 0 ? receivedHz
+                : transmit && m_radioState->splitEnabled() ? qint64(m_radioState->vfoB()) : qint64(m_radioState->vfoA());
+            auto record = LogbookUi::contact(call, "SSTV", frequency, m_sstvScreen->operatorCallsign());
+            if (!transmit && receivedUtc.isValid()) {
+                record["QSO_DATE"] = receivedUtc.toUTC().toString("yyyyMMdd");
+                record["TIME_ON"] = receivedUtc.toUTC().toString("HHmmss");
+            }
+            Ft8Logbook log(LogbookUi::storagePath());
+            QString error;
+            if (!log.load(&error)) { showInWindowMessage(m_sstvScreen, "Logbook", error); return; }
+            if (LogbookUi::edit(m_sstvScreen, log, record, -1, true))
+                showInWindowMessage(m_sstvScreen, "Log QSO", "Contact saved. Open Logbook to review or edit.");
+        });
         connect(m_sstvScreen, &SstvScreen::closeRequested, this, [this]() {
             if (m_sstvTxActive || m_sstvTxStarting)
                 stopSstvTransmission();
@@ -7453,6 +7770,9 @@ void MainWindow::openSstvScreen() {
         connect(m_sstvScreen, &SstvScreen::transmitRequested, this, &MainWindow::startSstvTransmit);
         connect(m_sstvScreen, &SstvScreen::stopRequested, this, &MainWindow::stopSstvTransmission);
         connect(m_sstvScreen, &SstvScreen::powerRequested, this, &MainWindow::setSstvRfPower);
+        connect(m_sstvScreen, &SstvScreen::audioSetupRequested, this, [this] {
+            showDigitalAudioSetup(int(DigitalTxGuard::Mode::Sstv), m_sstvScreen);
+        });
         connect(m_radioState, &RadioState::rfPowerChanged, m_sstvScreen,
                 [this](double watts, bool) { m_sstvScreen->setRfPower(watts); });
         const auto refreshSstvHeader = [this]() { refreshSstvRadioHeader(); };
@@ -7509,8 +7829,6 @@ void MainWindow::openSstvScreen() {
                 m_sstvTxStarting = false;
                 m_sstvTxActive = true;
                 m_sstvTxDraining = false;
-                m_sstvPeakAlc = 0;
-                m_sstvAlcWarningShown = false;
                 m_sstvScreen->setTransmitWarning(QString());
                 const QString callsign = m_sstvScreen->operatorCallsign();
                 m_sstvScreen->setTransmitting(
@@ -7527,16 +7845,20 @@ void MainWindow::openSstvScreen() {
             if (generation != m_sstvGeneration || (!m_sstvTxStarting && !m_sstvTxActive))
                 return;
             stopSstvTransmission();
-            if (m_sstvScreen)
+            if (m_sstvScreen) {
                 m_sstvScreen->setTransmitStatus(reason);
+                showDigitalProtection(int(DigitalTxGuard::Mode::Sstv), reason, true);
+            }
         });
         connect(m_audioEngine, &AudioEngine::sstvFailed, this,
                 [this](const QString &reason, quint64 generation) {
             if (generation != m_sstvGeneration || (!m_sstvTxStarting && !m_sstvTxActive))
                 return;
             stopSstvTransmission();
-            if (m_sstvScreen)
+            if (m_sstvScreen) {
                 m_sstvScreen->setTransmitStatus(reason);
+                showDigitalProtection(int(DigitalTxGuard::Mode::Sstv), reason, true);
+            }
         });
         connect(m_tcpClient, &TcpClient::sstvAudioAccepted, this,
                 [this](int emittedSamples, int totalSamples, int imageSamples,
@@ -7641,17 +7963,26 @@ void MainWindow::startSstvTransmit(const QImage &frame, int modeId) {
         m_sstvScreen->setTransmitStatus(QStringLiteral("CONNECT TO THE K4 BEFORE TRANSMITTING."));
         return;
     }
-    if (m_pttActive || m_radioState->isTransmitting() || m_sstvTxActive || m_sstvTxStarting) {
+    if (m_pttActive || m_radioState->isTransmitting() || m_sstvTxActive || m_sstvTxStarting || m_digitalCalibrating || m_ft8TxGeneration) {
         m_sstvScreen->setTransmitStatus(QStringLiteral("K4 IS ALREADY TRANSMITTING."));
         return;
     }
 
     const quint64 generation = ++m_sstvGeneration;
+    QSettings settings("QK4", "QK4");
+    m_sstvTransmitContext = digitalCalibrationContext(int(DigitalTxGuard::Mode::Sstv));
+    const auto calibrated = DigitalTxCalibration::load(settings, m_sstvTransmitContext);
+    if (!calibrated) {
+        showDigitalProtection(int(DigitalTxGuard::Mode::Sstv), "TX not started: calibrate TX audio for this radio setup first.", true);
+        return;
+    }
+    m_tcpClient->digitalTxControl()->gain.store(qMin(*calibrated, m_digitalReducedGains.value(DigitalTxCalibration::matchingContext(m_sstvTransmitContext), *calibrated)));
+    m_tcpClient->acknowledgeDigitalTxFault(); // This path follows the operator's PREVIEW & SEND action.
+    showDigitalProtection(int(DigitalTxGuard::Mode::Sstv), "TX protection: preparing calibrated audio", false);
     m_sstvTxStarting = true;
     m_sstvTxActive = false;
     m_sstvTxDraining = false;
-    m_sstvPeakAlc = 0;
-    m_sstvAlcWarningShown = false;
+    m_sstvProtectionFault = m_sstvProtectionReduced = false;
     m_sstvRxArmed.store(false, std::memory_order_release);
     m_sstvScreen->setTransmitWarning(QString());
     m_sstvScreen->setTransmitting(true, QStringLiteral("PREPARING SSTV PROGRAM AUDIO"));
@@ -7682,11 +8013,9 @@ void MainWindow::stopSstvTransmission() {
     m_sstvTxDraining = false;
     if (m_sstvScreen) {
         m_sstvScreen->setTransmitting(false);
-        if (m_sstvPeakAlc >= SstvAlcWarningLevel) {
-            m_sstvScreen->setTransmitStatus(
-                QStringLiteral("LAST TX PEAK ALC %1 • REDUCE K4 DATA/LINE INPUT LEVEL BELOW 5")
-                    .arg(m_sstvPeakAlc));
-        }
+        if (!m_sstvProtectionFault)
+            showDigitalProtection(int(DigitalTxGuard::Mode::Sstv), m_sstvProtectionReduced
+                ? "TX stopped · audio drive was reduced automatically" : "TX stopped · automatic protection ready", false);
         m_sstvScreen->returnToAutoReceive();
     }
     const bool resumeRx = m_sstvScreen && m_sstvScreen->isVisible();
@@ -7721,11 +8050,8 @@ void MainWindow::finishSstvTransmission() {
     m_sstvTxDraining = false;
     if (m_sstvScreen) {
         m_sstvScreen->setTransmitting(false);
-        if (m_sstvPeakAlc >= SstvAlcWarningLevel) {
-            m_sstvScreen->setTransmitStatus(
-                QStringLiteral("TX COMPLETE • PEAK ALC %1 HIGH • REDUCE K4 DATA/LINE INPUT LEVEL")
-                    .arg(m_sstvPeakAlc));
-        }
+        showDigitalProtection(int(DigitalTxGuard::Mode::Sstv), m_sstvProtectionReduced
+            ? "TX complete · audio drive was reduced automatically" : "TX complete · protection monitored ALC", false);
         m_sstvScreen->returnToAutoReceive();
     }
     const bool resumeRx = m_sstvScreen && m_sstvScreen->isVisible();
@@ -7735,7 +8061,7 @@ void MainWindow::finishSstvTransmission() {
 }
 
 void MainWindow::setSstvRfPower(double watts) {
-    if (!m_tcpClient || !m_tcpClient->isConnected() || m_sstvTxActive || m_sstvTxStarting)
+    if (!m_tcpClient || !m_tcpClient->isConnected() || m_sstvTxActive || m_sstvTxStarting || m_digitalCalibrating || m_ft8TxGeneration)
         return;
     const double power = qBound(1.0, watts, 110.0);
     if (power <= 10.0) {
@@ -7746,12 +8072,130 @@ void MainWindow::setSstvRfPower(double watts) {
     m_radioState->setRfPower(power);
 }
 
+QString MainWindow::digitalCalibrationContext(int mode) const {
+    const bool split = m_radioState->splitEnabled();
+    const qint64 frequency = split ? m_radioState->vfoB() : m_radioState->vfoA();
+    const int tone = mode == int(DigitalTxGuard::Mode::Sstv) ? 1500
+                     : m_ft8Screen ? m_ft8Screen->session().txHz : 1500;
+    QJsonObject context{{"profile", m_currentRadio.host}, {"port", m_currentRadio.port},
+                        {"digitalMode", mode}, {"band", Ft8::bandFor(frequency)},
+                        {"radioMode", split ? m_radioState->modeStringFullB() : m_radioState->modeStringFull()},
+                        {"codec", m_currentRadio.encodeMode}, {"latency", m_currentRadio.streamingLatency},
+                        {"tone", tone}, {"power", m_radioState->rfPower()},
+                        {"micGain", m_radioState->micGain()}, {"compression", m_radioState->compression()},
+                        {"lineSource", m_radioState->lineInSource()},
+                        {"lineUsb", m_radioState->lineInSoundCard()}, {"lineJack", m_radioState->lineInJack()}};
+    QJsonArray eq;
+    for (int band : m_radioState->txEqBands()) eq.append(band);
+    context.insert("txEq", eq);
+    QJsonObject firmware;
+    const auto versions = m_radioState->firmwareVersions();
+    for (auto it = versions.cbegin(); it != versions.cend(); ++it) firmware.insert(it.key(), it.value());
+    context.insert("firmware", firmware);
+    return QString::fromUtf8(QJsonDocument(context).toJson(QJsonDocument::Compact));
+}
+void MainWindow::showDigitalProtection(int mode, const QString &text, bool fault) {
+    if (mode == int(DigitalTxGuard::Mode::Sstv)) {
+        m_sstvProtectionFault = fault;
+        if (text.contains("reduced automatically", Qt::CaseInsensitive)) m_sstvProtectionReduced = true;
+        if (m_sstvScreen) m_sstvScreen->setTransmitProtection(text, fault);
+    } else if (m_ft8Screen)
+        m_ft8Screen->setTransmitProtection(text, fault);
+    if (m_digitalSetupStatus)
+        m_digitalSetupStatus->setText(text);
+}
+void MainWindow::showDigitalAudioSetup(int mode, QWidget *surface) {
+    QSettings settings("QK4", "QK4");
+    const auto saved = DigitalTxCalibration::load(settings, digitalCalibrationContext(mode));
+    DigitalAudioSetupDialog dialog(surface, saved.has_value());
+    m_digitalSetupStatus = dialog.statusLabel();
+    const auto refreshReadiness = [this, &dialog] {
+        const QString txMode = m_radioState->splitEnabled() ? m_radioState->modeStringFullB()
+                                                           : m_radioState->modeStringFull();
+        dialog.setRadioReadiness(m_tcpClient->isConnected() && !m_radioState->isTransmitting()
+            && !m_pttActive && !m_sstvTxStarting && !m_sstvTxActive,
+            txMode.startsWith("DATA"), m_radioState->lineInSource() >= 0);
+    };
+    connect(m_radioState, &RadioState::modeChanged, &dialog, refreshReadiness);
+    connect(m_radioState, &RadioState::modeBChanged, &dialog, refreshReadiness);
+    connect(m_radioState, &RadioState::dataSubModeChanged, &dialog, refreshReadiness);
+    connect(m_radioState, &RadioState::dataSubModeBChanged, &dialog, refreshReadiness);
+    connect(m_radioState, &RadioState::splitChanged, &dialog, refreshReadiness);
+    connect(m_radioState, &RadioState::lineInChanged, &dialog, refreshReadiness);
+    connect(m_radioState, &RadioState::transmitStateChanged, &dialog, refreshReadiness);
+    connect(m_tcpClient, &TcpClient::stateChanged, &dialog, refreshReadiness);
+    refreshReadiness();
+    connect(&dialog, &DigitalAudioSetupDialog::calibrateRequested, &dialog, [this, mode, &dialog] {
+        startDigitalCalibration(mode);
+        dialog.setBusy(m_digitalCalibrating);
+    });
+    connect(&dialog, &DigitalAudioSetupDialog::stopRequested, &dialog, [this, &dialog] {
+        cancelDigitalCalibration();
+        dialog.setBusy(m_digitalCalibrating);
+    });
+    connect(&dialog, &DigitalAudioSetupDialog::dataModeRequested, &dialog, [this, &dialog] {
+        if (!m_tcpClient->isConnected() || m_digitalCalibrating || m_radioState->isTransmitting()
+            || m_pttActive || m_sstvTxStarting || m_sstvTxActive || m_ft8TxGeneration) return;
+        // Same DATA-A selection as the main mode popup; this is an explicit tap.
+        m_tcpClient->sendCAT(m_radioState->splitEnabled() ? "MD$6;DT$0;MD$;DT$;LI;MG;CP;TE;"
+                                                        : "MD6;DT0;MD;DT;LI;MG;CP;TE;");
+        dialog.findChild<QLabel *>("digitalCalibrationReadiness")->setText("DATA mode requested · waiting for K4 readback");
+    });
+    connect(m_tcpClient, &TcpClient::digitalCalibrationFinished, &dialog, [&dialog] { dialog.setBusy(false); });
+    connect(m_audioEngine, &AudioEngine::digitalCalibrationPreparationFailed, &dialog, [&dialog] { dialog.setBusy(false); });
+    m_tcpClient->sendCAT("MD;DT;MD$;DT$;LI;MG;CP;TE;"); // Read only; never set on opening.
+    dialog.exec();
+    cancelDigitalCalibration();
+    m_digitalSetupStatus = nullptr;
+    refreshFt8Capture();
+}
+void MainWindow::startDigitalCalibration(int mode) {
+    if (!m_tcpClient->isConnected() || m_pttActive || m_radioState->isTransmitting()
+        || m_sstvTxActive || m_sstvTxStarting || m_digitalCalibrating || m_ft8TxGeneration) {
+        showDigitalProtection(mode, "Calibration unavailable: connect and return the K4 to receive.", true);
+        return;
+    }
+    const QString radioMode = m_radioState->splitEnabled() ? m_radioState->modeStringFullB()
+                                                          : m_radioState->modeStringFull();
+    if (!radioMode.startsWith("DATA") || m_radioState->lineInSource() < 0) {
+        showDigitalProtection(mode, "Select K4 DATA mode and wait for input settings before calibrating.", true);
+        return;
+    }
+    m_digitalCalibrating = true;
+    m_digitalCalibrationStarted = false;
+    m_digitalCalibrationMode = mode;
+    m_digitalCalibrationGeneration = ++m_sstvGeneration;
+    m_digitalCalibrationContext = digitalCalibrationContext(mode);
+    m_sstvRxArmed.store(false, std::memory_order_release);
+    refreshFt8Capture();
+    m_tcpClient->acknowledgeDigitalTxFault();
+    showDigitalProtection(mode, "Preparing TX audio calibration · STOP cancels", false);
+    const int tone = mode == int(DigitalTxGuard::Mode::Sstv) ? 1500 : m_ft8Screen->session().txHz;
+    QMetaObject::invokeMethod(m_audioEngine, "prepareDigitalCalibration", Qt::QueuedConnection,
+                              Q_ARG(int, tone), Q_ARG(quint64, m_digitalCalibrationGeneration));
+}
+void MainWindow::cancelDigitalCalibration() {
+    if (!m_digitalCalibrating) return;
+    m_audioEngine->requestSstvStop();
+    QMetaObject::invokeMethod(m_audioEngine, "stopSstvTransmit", Qt::QueuedConnection);
+    m_tcpClient->cancelDigitalCalibration();
+    if (!m_digitalCalibrationStarted) {
+        m_digitalCalibrating = false;
+        showDigitalProtection(m_digitalCalibrationMode, "Calibration cancelled · previous saved level retained", false);
+        refreshFt8Capture();
+        if (m_sstvScreen && m_sstvScreen->isVisible()) {
+            m_sstvRxArmed.store(true, std::memory_order_release);
+            QMetaObject::invokeMethod(m_sstvDecoder, "resetAuto", Qt::QueuedConnection);
+        }
+    }
+}
+
 void MainWindow::executeMacro(const QString &functionId) {
     MacroEntry macro = RadioSettings::instance()->macro(functionId);
     if (!macro.command.isEmpty()) {
         qDebug() << "Executing macro" << functionId << ":" << macro.command;
         if (m_tcpClient && m_tcpClient->isConnected()) {
-            m_tcpClient->sendCAT(macro.command);
+            m_tcpClient->sendMacro(macro.command);
         }
     } else {
         qDebug() << "No macro configured for" << functionId;
@@ -7761,13 +8205,16 @@ void MainWindow::executeMacro(const QString &functionId) {
 void MainWindow::executeMidiMacro(const QString &command) {
     if (command.isEmpty() || !m_tcpClient || !m_tcpClient->isConnected())
         return;
-    // A mapping owns one complete K4 command string. Do not combine it with
-    // any app macro or another button assignment.
-    m_tcpClient->sendCAT(command);
+    // Execute this assignment once, then refresh radio state just as Fn macros do.
+    m_tcpClient->sendMacro(command);
 }
 
 void MainWindow::handleMidiKnobAction(const QString &action, int value, bool absolute) {
     if (action == QStringLiteral("disabled") || (!absolute && value == 0))
+        return;
+    // The visible module owns the tuning dial before console VFO dispatch.
+    if (m_ft8Screen && m_ft8Screen->isVisible() &&
+        m_ft8Screen->handleMidiKnobAction(action, value, absolute))
         return;
     if (action == QStringLiteral("selected_adjustment")) {
         handleMidiKnobAction(m_midiSelectedKnobAction, value, absolute);
@@ -8140,6 +8587,15 @@ void MainWindow::handleMidiKnobAction(const QString &action, int value, bool abs
 
 void MainWindow::handleMidiButtonAction(const QString &action) {
     if (action == QStringLiteral("disabled"))
+        return;
+    if (action == QStringLiteral("adjust_ft8_rx_tx")) {
+        if (!m_ft8Screen || !m_ft8Screen->isVisible())
+            openFt8Screen();
+        if (m_ft8Screen && m_ft8Screen->isVisible())
+            m_ft8Screen->handleMidiButtonAction(action);
+        return;
+    }
+    if (m_ft8Screen && m_ft8Screen->isVisible() && m_ft8Screen->handleMidiButtonAction(action))
         return;
     const QString selectedAction = MidiMapping::knobActionForButtonAction(action);
     if (!selectedAction.isEmpty()) {

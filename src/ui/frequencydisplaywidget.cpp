@@ -5,6 +5,8 @@
 #include <QKeyEvent>
 #include <QWheelEvent>
 #include <QFontMetrics>
+#include <QTimer>
+#include <QResizeEvent>
 
 FrequencyDisplayWidget::FrequencyDisplayWidget(QWidget *parent)
     : QWidget(parent), m_digits(QString(kDigits, '0')), m_normalColor(K4Styles::Colors::TextWhite),
@@ -27,10 +29,19 @@ FrequencyDisplayWidget::FrequencyDisplayWidget(QWidget *parent)
     int width = m_charWidth * kDigits + m_dotWidth * 3 + 4; // +4 for padding
     setMinimumWidth(width);
     setFixedHeight(K4Styles::Dimensions::MenuItemHeight);
+    m_holdTimer = new QTimer(this);
+    m_holdTimer->setSingleShot(true);
+    m_holdTimer->setInterval(550);
+    connect(m_holdTimer, &QTimer::timeout, this, [this] {
+        if (m_touchTuningEnabled && isVisible() && isEnabled())
+            emit directEntryRequested();
+    });
 }
 
 void FrequencyDisplayWidget::setFrequency(const QString &frequency) {
     parseFrequency(frequency);
+    if (m_autoFit)
+        updateFontMetrics();
     update();
 }
 
@@ -65,6 +76,66 @@ void FrequencyDisplayWidget::setTuningRateDigit(int digitFromRight) {
 
 bool FrequencyDisplayWidget::isEditing() const {
     return m_cursorPosition >= 0;
+}
+
+void FrequencyDisplayWidget::setAutoFit(bool enabled) {
+    m_autoFit = enabled;
+    if (enabled) {
+        setMinimumWidth(0);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+    updateFontMetrics();
+    update();
+}
+
+void FrequencyDisplayWidget::setTouchTuningEnabled(bool enabled) {
+    if (isEditing())
+        exitEditMode(false);
+    m_touchTuningEnabled = enabled;
+}
+
+void FrequencyDisplayWidget::setSelectedTuningDigit(int digitFromRight) {
+    m_touchStepPosition = digitFromRight < 0 ? -1 : kMaxDigitIndex - qBound(0, digitFromRight, kMaxDigitIndex);
+    update();
+}
+
+void FrequencyDisplayWidget::updateFontMetrics() {
+    m_font = K4Styles::Fonts::dataFont(K4Styles::Dimensions::FontSizeFrequency);
+    if (m_autoFit) {
+        const QString text = formatWithDots();
+        const int dots = text.count('.');
+        const QFontMetrics metrics(m_font);
+        const int textWidth = (text.size() - dots) * metrics.horizontalAdvance('0') + dots * metrics.horizontalAdvance('.');
+        if (textWidth > width() - 4)
+            m_font.setPixelSize(qMax(10, m_font.pixelSize() * qMax(1, width() - 4) / qMax(1, textWidth)));
+    }
+    const QFontMetrics metrics(m_font);
+    m_charWidth = metrics.horizontalAdvance('0');
+    m_dotWidth = metrics.horizontalAdvance('.');
+}
+
+void FrequencyDisplayWidget::resizeEvent(QResizeEvent *event) {
+    QWidget::resizeEvent(event);
+    if (m_autoFit)
+        updateFontMetrics();
+}
+
+bool FrequencyDisplayWidget::event(QEvent *event) {
+    if (m_holdTimer && (event->type() == QEvent::Hide || event->type() == QEvent::WindowDeactivate ||
+                        event->type() == QEvent::TouchCancel))
+        m_holdTimer->stop();
+    return QWidget::event(event);
+}
+
+void FrequencyDisplayWidget::mouseMoveEvent(QMouseEvent *event) {
+    if ((event->pos() - m_touchPress).manhattanLength() > 10)
+        m_holdTimer->stop();
+    QWidget::mouseMoveEvent(event);
+}
+
+void FrequencyDisplayWidget::mouseReleaseEvent(QMouseEvent *event) {
+    m_holdTimer->stop();
+    QWidget::mouseReleaseEvent(event);
 }
 
 void FrequencyDisplayWidget::parseFrequency(const QString &freq) {
@@ -308,22 +379,21 @@ void FrequencyDisplayWidget::mousePressEvent(QMouseEvent *event) {
         if (insideWidget) {
             int digitPos = digitPositionFromX(event->pos().x());
             if (digitPos >= 0) {
-#ifdef Q_OS_ANDROID
-                // A phone has no physical keyboard. Keep the digit visibly
-                // selected and let the dedicated touch controls step it.
-                m_touchStepPosition = digitPos;
-                emit tuningDigitSelected(kMaxDigitIndex - digitPos);
-                update();
-#else
-                if (m_cursorPosition < 0) {
-                    // Not in edit mode - enter it
-                    enterEditMode(digitPos);
-                } else {
-                    // Already in edit mode - move cursor
-                    m_cursorPosition = digitPos;
+                if (m_touchTuningEnabled) {
+                    // Keep the digit selected for the touch controls or dial.
+                    m_touchStepPosition = digitPos;
+                    m_touchPress = event->pos();
+                    m_holdTimer->start();
+                    emit tuningDigitSelected(kMaxDigitIndex - digitPos);
                     update();
+                } else {
+                    if (m_cursorPosition < 0) {
+                        enterEditMode(digitPos);
+                    } else {
+                        m_cursorPosition = digitPos;
+                        update();
+                    }
                 }
-#endif
             }
         }
     }

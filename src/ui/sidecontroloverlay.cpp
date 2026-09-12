@@ -1,10 +1,12 @@
 #include "sidecontroloverlay.h"
+#include "overlaybackhandler.h"
 #include "k4styles.h"
 #include <QPainter>
 #include <QWheelEvent>
 #include <QMouseEvent>
 
 SideControlOverlay::SideControlOverlay(Context ctx, QWidget *parent) : QWidget(parent), m_context(ctx) {
+    new OverlayBackHandler(this);
     // Start hidden
     hide();
 }

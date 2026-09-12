@@ -956,6 +956,20 @@ SstvScreen::SstvScreen(QWidget *parent) : QWidget(parent) {
     restoreDraft();
 }
 
+void SstvScreen::requestLogQso(bool transmit) {
+    qint64 frequency = 0;
+    QDateTime receivedUtc;
+    if (!transmit) {
+        for (const auto &record : m_receiveRecords)
+            if (record.id == m_currentReceiveId) {
+                frequency = record.frequencyHz;
+                receivedUtc = record.receivedUtc;
+                break;
+            }
+    }
+    emit logQsoRequested((transmit ? m_toCallsignEdit : m_receiveCallsignEdit)->text().trimmed().toUpper(),
+                         transmit, frequency, receivedUtc);
+}
 void SstvScreen::setupUi() {
     auto *root = new QVBoxLayout(this);
     // The stacked TX editor has a large natural width. Do not let its hidden
@@ -994,6 +1008,12 @@ void SstvScreen::setupUi() {
     header->addWidget(title);
     header->addLayout(radioState, 1);
     root->addLayout(header);
+    m_protectionLabel = new QLabel("TX protection ready · calibrate audio before first use", this);
+    m_protectionLabel->setObjectName("sstvTxProtection");
+    m_protectionLabel->setWordWrap(true);
+    m_protectionLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_protectionLabel->setMinimumWidth(0);
+    root->addWidget(m_protectionLabel);
 
     auto *tabs = new QHBoxLayout;
     m_receiveTab = new QPushButton(QStringLiteral("RECEIVE"), this);
@@ -1004,6 +1024,12 @@ void SstvScreen::setupUi() {
     connect(m_transmitTab, &QPushButton::clicked, this, [this]() { selectTab(true); });
     tabs->addWidget(m_receiveTab, 1);
     tabs->addWidget(m_transmitTab, 1);
+    auto *logbook = new QPushButton(QStringLiteral("Logbook"), this);
+    logbook->setObjectName("sstvLogbook");
+    logbook->setStyleSheet(buttonStyle(QStringLiteral("#6dd4ef")));
+    logbook->setFixedHeight(30);
+    tabs->addWidget(logbook);
+    connect(logbook, &QPushButton::clicked, this, &SstvScreen::logbookRequested);
     root->addLayout(tabs);
 
     m_pages = new QStackedWidget(this);
@@ -1108,6 +1134,12 @@ void SstvScreen::setupUi() {
     receiveSettingsRow->addWidget(makeReceiveFieldLabel(QStringLiteral("KEEP")));
     receiveSettingsRow->addWidget(m_retentionCombo);
     receiveSettingsRow->addStretch();
+    auto *rxLog = new QPushButton(QStringLiteral("Log QSO"), receivePage);
+    rxLog->setObjectName("sstvRxLogQso");
+    rxLog->setStyleSheet(buttonStyle(QStringLiteral("#6dd4ef")));
+    rxLog->setFixedHeight(28);
+    receiveSettingsRow->addWidget(rxLog);
+    connect(rxLog, &QPushButton::clicked, this, [this] { requestLogQso(false); });
     receiveSettingsRow->addWidget(m_clearReceiveHistoryButton);
     receiveLayout->addLayout(receiveSettingsRow);
     connect(m_receiveHistoryCombo, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -1166,6 +1198,12 @@ void SstvScreen::setupUi() {
         "QProgressBar { background: #25292b; border: 0; border-radius: 4px; }"
         "QProgressBar::chunk { background: #f2ad20; border-radius: 4px; }"));
     canvasColumn->addWidget(m_txProgress);
+    auto *txLog = new QPushButton(QStringLiteral("Log QSO"), transmitPage);
+    txLog->setObjectName("sstvTxLogQso");
+    txLog->setStyleSheet(buttonStyle(QStringLiteral("#6dd4ef")));
+    txLog->setFixedHeight(28);
+    canvasColumn->addWidget(txLog);
+    connect(txLog, &QPushButton::clicked, this, [this] { requestLogQso(true); });
     m_transmitLayout->addLayout(canvasColumn, 3);
 
     // Preserve useful image area on a compact phone while keeping every TX
@@ -1387,6 +1425,7 @@ void SstvScreen::setupUi() {
     });
     auto *toCallRow = new QHBoxLayout;
     m_toCallsignEdit = new QLineEdit(transmitPage);
+    m_toCallsignEdit->setObjectName("sstvToCall");
     m_toCallsignEdit->setPlaceholderText(QStringLiteral("OPTIONAL REPLY STATION"));
     m_toCallsignEdit->setAlignment(Qt::AlignLeft | Qt::AlignVCenter);
     m_toCallsignEdit->setMaxLength(16);
@@ -1726,6 +1765,11 @@ void SstvScreen::setupUi() {
     });
 
     controls->addWidget(new QLabel(QStringLiteral("TX POWER • SYNCED"), transmitPage));
+    auto *audioSetup = new QPushButton("CALIBRATE TX AUDIO / PROTECTION", transmitPage);
+    audioSetup->setObjectName("sstvAudioSetup");
+    audioSetup->setStyleSheet(buttonStyle(QStringLiteral("#6dd4ef")));
+    controls->addWidget(audioSetup);
+    connect(audioSetup, &QPushButton::clicked, this, &SstvScreen::audioSetupRequested);
     auto *powerRow = new QHBoxLayout;
     auto *minus = new QPushButton(QStringLiteral("−"), transmitPage);
     auto *plus = new QPushButton(QStringLiteral("+"), transmitPage);
@@ -1947,6 +1991,12 @@ void SstvScreen::returnToAutoReceive() {
 
 void SstvScreen::setReceiveStatus(const QString &status) {
     m_receiveStatus->setText(status);
+}
+void SstvScreen::setTransmitProtection(const QString &text, bool fault) {
+    m_protectionLabel->setText(text);
+    m_protectionLabel->setAccessibleName(text);
+    m_protectionLabel->setStyleSheet(fault ? "color:#ff8e8e;font-weight:700;font-size:12px;"
+                                         : "color:#9ee4af;font-size:12px;");
 }
 
 void SstvScreen::setReceiveInputLevel(int percent) {

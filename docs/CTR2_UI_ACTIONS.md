@@ -14,6 +14,45 @@ the appropriate control surface. When a knob mode is mapped to **Selected
 adjustment**, pressing an **Adjust:** button opens and selects the surface,
 displays `CTR2 KNOB: ...`, and assigns the knob to it.
 
+## FT8 / FT4 tone control
+
+Choose any surrounding button in CTR2 setup. The recommended mapping uses one
+physical button and the wheel:
+
+| Input | Action |
+|---|---|
+| Short press | **FT8/FT4: Switch RX/TX tone** (`adjust_ft8_rx_tx`) |
+| Long press | **FT8/FT4: Set tone frequency** (`set_ft8_frequency`) |
+| Dial | **Selected adjustment (button)** (`selected_adjustment`) |
+
+The button number is user-selectable, and the actions work in both FT8 and FT4.
+
+1. Short-press the assigned button to choose the RX or TX tone. RX is selected
+   when the module opens, so the first short press selects TX.
+2. Turn the wheel to move the dashed preview marker for the selected tone.
+3. Long-press the assigned button to set that frequency and finish the
+   adjustment.
+
+Setting TX enables **Hold TX**. Setting RX focuses **My QSO** on decoded signals
+near that audio frequency while **All** continues to show the full band. The
+solid markers show the currently set frequencies while a dashed marker shows the
+pending adjustment. After a frequency is set, the wheel remains inactive until
+the operator selects RX or TX adjustment again.
+
+The RX/TX readout opens the **FT8/FT4 tone tuning** panel. It provides **Select
+RX tone**, **Select TX tone**, **Set tone frequency**, and tone steps of 1, 5,
+10, 25, and 50 Hz. Touch selection on the waterfall remains available.
+
+While a digital tone is selected, **Rate**, **KHZ**, VFO selection, and band-step
+actions cannot change the radio frequency. Tap a radio-frequency digit first to
+select deliberate RF tuning. Selecting an RX or TX tone returns the wheel to
+tone control.
+
+The optional [FT8 sample mapping](QK4-CTR2-FT8-Sample.qk4ctr2map) demonstrates
+Button 6 in Normal mode and the Home Wheel A dial. Importing a mapping replaces
+the current mapping, so copy these assignments into an existing custom map when
+other controls must be preserved.
+
 ## Understanding CTR2 modes
 
 CTR2-MIDI has four knob modes: **Home**, **Knob mode 1**, **Knob mode 2**, and
@@ -64,7 +103,10 @@ Home assignments as the 12 shared Normal Button Mode assignments.
 | Button 6 | 6 / 30 | 12 / 36 | 18 / 42 | 24 / 48 |
 
 QK4 executes front-panel button actions when the button is released, matching
-CTR2-MIDI's NoteOn-on-release behavior.
+CTR2-MIDI's positive-velocity NoteOn-on-release behavior. No NoteOff is needed;
+NoteOff and zero-velocity NoteOn do not repeat a front-panel action. See the
+[manufacturer's operation manual](https://ctr2.lynovation.com/wp-content/uploads/2026/02/CTR2-MIDI_Operation_Manual_v20100a.pdf),
+page 17. CW/key/PTT inputs still use both MIDI edges.
 
 ## Knob output formats and directional Button notes
 

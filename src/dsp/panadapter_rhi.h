@@ -29,6 +29,14 @@ public:
     // Update from MiniPAN packet (simpler format)
     void updateMiniSpectrum(const QByteArray &bins);
 
+    // Audio tools use the same GPU spectrum, waterfall, palette and history.
+    // Frequencies are audio Hz; amplitudes are relative, never radio dBm.
+    void setAudioView(double lowHz, double spanHz);
+    void updateAudioSpectrum(const QVector<float> &db, double firstBinHz, double binHz);
+    bool isAudioView() const { return m_audioView; }
+    int waterfallColor() const { return m_waterfallColor; }
+    int waterfallColorRange() const { return m_waterfallColorRange; }
+
     // Configuration
     void setDbRange(float minDb, float maxDb);
     void setSpectrumRatio(float ratio);
@@ -72,6 +80,7 @@ public:
     void setBackgroundGradient(const QColor &center, const QColor &edge);
 
 signals:
+    void waterfallAppearanceChanged(int palette, int range);
     void frequencyClicked(qint64 freq);
     void frequencyDragged(qint64 freq);
     void frequencyScrolled(int steps);
@@ -86,6 +95,7 @@ protected:
     // QRhiWidget overrides
     void initialize(QRhiCommandBuffer *cb) override;
     void render(QRhiCommandBuffer *cb) override;
+    void releaseResources() override;
     void resizeEvent(QResizeEvent *event) override;
 
     // Input events
@@ -109,6 +119,7 @@ private:
     // Data processing
     void decompressBins(const QByteArray &bins, QVector<float> &out);
     void updateWaterfallData();
+    void updateAudioTrace();
 
     // Coordinate helpers
     float normalizeDb(float db);
@@ -123,6 +134,8 @@ private:
     std::unique_ptr<QRhiBuffer> m_waterfallUniformBuffer;
     std::unique_ptr<QRhiBuffer> m_overlayVbo;
     std::unique_ptr<QRhiBuffer> m_overlayUniformBuffer;
+    std::unique_ptr<QRhiBuffer> m_peakVbo;
+    std::unique_ptr<QRhiBuffer> m_peakUniformBuffer;
     std::unique_ptr<QRhiBuffer> m_passbandVbo;
     std::unique_ptr<QRhiBuffer> m_passbandUniformBuffer;
     std::unique_ptr<QRhiBuffer> m_markerVbo;
@@ -147,6 +160,7 @@ private:
     std::unique_ptr<QRhiTexture> m_spectrumColorLutTexture; // 256-entry color LUT
     std::unique_ptr<QRhiShaderResourceBindings> m_waterfallSrb;
     std::unique_ptr<QRhiShaderResourceBindings> m_overlaySrb;
+    std::unique_ptr<QRhiShaderResourceBindings> m_peakSrb;
     std::unique_ptr<QRhiShaderResourceBindings> m_passbandSrb;
     std::unique_ptr<QRhiShaderResourceBindings> m_markerSrb;
     std::unique_ptr<QRhiShaderResourceBindings> m_notchSrb;
@@ -173,6 +187,12 @@ private:
 
     // Spectrum data
     QVector<float> m_currentSpectrum;
+    bool m_audioView = false;
+    QVector<float> m_audioSpectrum;
+    double m_audioFirstHz = 100, m_audioBinHz = 6.25;
+    double m_audioLowHz = 0, m_audioSpanHz = 3000;
+    float m_audioFloor = -90;
+    bool m_audioFloorValid = false;
     QVector<float> m_rawSpectrum;
     QVector<float> m_peakHold;
     qint64 m_peakGeometryCenterFreq = 0;

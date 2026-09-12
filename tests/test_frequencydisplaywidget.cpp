@@ -8,6 +8,7 @@ class TestFrequencyDisplayWidget : public QObject {
 private slots:
     void formats_data();
     void formats();
+    void phoneDigitGestures();
 };
 
 void TestFrequencyDisplayWidget::formats_data() {
@@ -26,6 +27,44 @@ void TestFrequencyDisplayWidget::formats() {
     FrequencyDisplayWidget widget;
     widget.setFrequency(input);
     QCOMPARE(widget.displayText(), expected);
+}
+
+void TestFrequencyDisplayWidget::phoneDigitGestures() {
+    QWidget host;
+    host.resize(220, 70);
+    FrequencyDisplayWidget widget(&host);
+    widget.setAutoFit(true);
+    widget.setTouchTuningEnabled(true);
+    widget.resize(180, 34);
+    widget.setFrequency("1296000000");
+    widget.show();
+    host.show();
+    QSignalSpy digits(&widget, &FrequencyDisplayWidget::tuningDigitSelected);
+    QSignalSpy entry(&widget, &FrequencyDisplayWidget::directEntryRequested);
+    QSignalSpy changed(&widget, &FrequencyDisplayWidget::frequencyEntered);
+    // The first GHz digit must remain reachable after shrinking to phone width.
+    QTest::mouseClick(&widget, Qt::LeftButton, Qt::NoModifier, QPoint(2, 15));
+    QCOMPARE(digits.size(), 1);
+    QCOMPARE(digits[0][0].toInt(), 9);
+    QVERIFY(!widget.isEditing());
+    QVERIFY(changed.isEmpty());
+    QTest::qWait(600);
+    QVERIFY(entry.isEmpty());
+    QTest::mousePress(&widget, Qt::LeftButton, Qt::NoModifier, QPoint(2, 15));
+    QTest::qWait(600);
+    QTest::mouseRelease(&widget, Qt::LeftButton, Qt::NoModifier, QPoint(2, 15));
+    QCOMPARE(entry.size(), 1);
+    entry.clear();
+    QTest::mousePress(&widget, Qt::LeftButton, Qt::NoModifier, QPoint(2, 15));
+    QTest::mouseMove(&widget, QPoint(60, 15));
+    QTest::qWait(600);
+    QTest::mouseRelease(&widget, Qt::LeftButton, Qt::NoModifier, QPoint(60, 15));
+    QVERIFY(entry.isEmpty());
+    QTest::mousePress(&widget, Qt::LeftButton, Qt::NoModifier, QPoint(2, 15));
+    widget.hide();
+    QTest::qWait(600);
+    QVERIFY(entry.isEmpty());
+    QVERIFY(changed.isEmpty());
 }
 
 QTEST_MAIN(TestFrequencyDisplayWidget)

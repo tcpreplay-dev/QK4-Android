@@ -1,4 +1,5 @@
 #include "optionsdialog.h"
+#include "overlaybackhandler.h"
 #include "k4styles.h"
 #include "micmeterwidget.h"
 #include "inwindowdialog.h"
@@ -99,6 +100,7 @@ OptionsDialog::~OptionsDialog() {
 }
 
 void OptionsDialog::setupUi() {
+    new OverlayBackHandler(this, [this] { requestReturnToOperate(); });
     setWindowTitle("Options");
 #ifdef Q_OS_ANDROID
     setMinimumSize(0, 0);

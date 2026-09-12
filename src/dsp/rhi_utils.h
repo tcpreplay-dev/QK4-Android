@@ -7,6 +7,13 @@
 
 namespace RhiUtils {
 
+// Shared std140 layout used by both PAN renderers and waterfall.vert/.frag.
+struct alignas(16) WaterfallUniforms {
+    float scrollOffset, binCount, textureWidth, padding;
+    float viewStart, viewWidth, pad1, pad2;
+};
+static_assert(sizeof(WaterfallUniforms) == 32);
+
 // Load a compiled shader from a .qsb resource file
 // Returns invalid QShader on failure (check with isValid())
 inline QShader loadShader(const QString &path) {

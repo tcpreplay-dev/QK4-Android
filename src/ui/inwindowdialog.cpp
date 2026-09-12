@@ -2,14 +2,18 @@
 
 #include "k4styles.h"
 
+#include <QApplication>
 #include <QEventLoop>
 #include <QEvent>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QInputMethod>
 #include <QLabel>
 #include <QPushButton>
+#include <QPointer>
 #include <QVBoxLayout>
+#include <QWindow>
 
 InWindowDialog::InWindowDialog(QWidget *parent)
     : QWidget(parent) {
@@ -54,18 +58,52 @@ int InWindowDialog::exec() {
 
     fitToParent();
     m_result = Rejected;
+    m_backHidKeyboard = false;
+    const QPointer<QWidget> previousFocus = QApplication::focusWidget();
     show();
     raise();
     setFocus(Qt::OtherFocusReason);
 
     QEventLoop eventLoop;
     m_eventLoop = &eventLoop;
+    // The overlay is a child widget, not a native modal window. Intercept Back
+    // before focused editors/lists can ignore it and propagate it to the screen
+    // underneath. Qt calls the most recently installed filter first, so nested
+    // sheets handle their own Back without dismissing the logbook as well.
+    qApp->installEventFilter(this);
     eventLoop.exec();
+    qApp->removeEventFilter(this);
     m_eventLoop = nullptr;
+    if (previousFocus && previousFocus->isVisible() && previousFocus->isEnabled())
+        previousFocus->setFocus(Qt::OtherFocusReason);
     return m_result;
 }
 
 bool InWindowDialog::eventFilter(QObject *watched, QEvent *event) {
+    if (m_eventLoop && isVisible()
+        && (event->type() == QEvent::ShortcutOverride || event->type() == QEvent::KeyPress
+            || event->type() == QEvent::KeyRelease)) {
+        const auto *widget = qobject_cast<QWidget *>(watched);
+        if (watched == window()->windowHandle() || (widget && widget->window() == window())) {
+            auto *key = static_cast<QKeyEvent *>(event);
+            if (key->key() == Qt::Key_Back || key->key() == Qt::Key_Escape) {
+                event->accept();
+                if (event->type() == QEvent::KeyPress && !key->isAutoRepeat()) {
+                    m_backHidKeyboard = QGuiApplication::inputMethod()->isVisible();
+                    if (m_backHidKeyboard)
+                        QGuiApplication::inputMethod()->hide();
+                }
+                // Keep the sheet alive through the key release; otherwise the
+                // second half of Android Back can reach the invoking screen.
+                if (event->type() == QEvent::KeyRelease && !key->isAutoRepeat()) {
+                    if (!m_backHidKeyboard)
+                        reject();
+                    m_backHidKeyboard = false;
+                }
+                return true;
+            }
+        }
+    }
     if (watched == parentWidget() && event->type() == QEvent::Resize)
         fitToParent();
     return QWidget::eventFilter(watched, event);
@@ -104,14 +142,6 @@ void InWindowDialog::done(int result) {
     emit finished(result);
     if (m_eventLoop)
         m_eventLoop->quit();
-}
-
-void InWindowDialog::keyPressEvent(QKeyEvent *event) {
-    if (event->key() == Qt::Key_Escape || event->key() == Qt::Key_Back) {
-        reject();
-        return;
-    }
-    QWidget::keyPressEvent(event);
 }
 
 void showInWindowMessage(QWidget *parent, const QString &title, const QString &message) {

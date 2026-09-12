@@ -26,7 +26,9 @@ private slots:
     void ctr2StraightKeyAndPttSwap();
     void ctr2PaddleModePtt();
     void tinyMidiStraightKeySelection();
-    void routesButtonMacroOnRelease();
+    void routesButtonMacroOnNoteOn();
+    void routesCtr2ShortAndLongButtons_data();
+    void routesCtr2ShortAndLongButtons();
     void routesLearnedCustomMessages();
     void sliderEstablishesBaselineBeforeMoving();
     void ctr2SliderControlsUseSingleSignedSteps();
@@ -35,7 +37,7 @@ private slots:
     void upgradesLegacyBuiltInKnobFormatsOnly();
     void routesKnobButtonDirectionPairs();
     void adjustmentSelectorsCoverTypedKnobs();
-    void routesAdjustmentSelectorOnRelease();
+    void routesAdjustmentSelectorOnNoteOn();
 };
 
 void TestMidiMapping::ctr2DefaultsMatchK4Control() {
@@ -302,9 +304,9 @@ void TestMidiMapping::exportedFileDocumentsEveryPredefinedAction() {
     for (const QString &action : MidiMapping::supportedButtonActions()) {
         if (action == QStringLiteral("macro"))
             continue;
-        const QJsonObject &group = MidiMapping::knobActionForButtonAction(action).isEmpty()
-                                       ? immediateActions
-                                       : adjustmentSelectors;
+        const QJsonObject &group = action.startsWith(QStringLiteral("adjust_"))
+                                       ? adjustmentSelectors
+                                       : immediateActions;
         QVERIFY2(group.contains(action), qPrintable(action));
         QCOMPARE(group.value(action).toString(), MidiMapping::buttonActionLabel(action));
     }
@@ -481,7 +483,7 @@ void TestMidiMapping::tinyMidiStraightKeySelection() {
     QCOMPARE(keySpy.count(), 2);
 }
 
-void TestMidiMapping::routesButtonMacroOnRelease() {
+void TestMidiMapping::routesButtonMacroOnNoteOn() {
     MidiInputRouter router;
     auto mapping = MidiMapping::ctr2Default();
     mapping.macros.insert(QStringLiteral("f3"), {QStringLiteral("F3"), QStringLiteral("SWT13;")});
@@ -490,7 +492,7 @@ void TestMidiMapping::routesButtonMacroOnRelease() {
     QSignalSpy macroSpy(&router, &MidiInputRouter::macroRequested);
 
     router.processEvent(QStringLiteral("ctr2"), 0x90, 5, 127);
-    QCOMPARE(macroSpy.count(), 0);
+    QCOMPARE(macroSpy.count(), 1);
     router.processEvent(QStringLiteral("ctr2"), 0x80, 5, 0);
     QCOMPARE(macroSpy.count(), 1);
     QCOMPARE(macroSpy.at(0).at(1).toString(), QStringLiteral("SWT13;"));
@@ -727,7 +729,7 @@ void TestMidiMapping::adjustmentSelectorsCoverTypedKnobs() {
     QVERIFY(MidiMapping::knobActionForButtonAction(QStringLiteral("nr_toggle")).isEmpty());
 }
 
-void TestMidiMapping::routesAdjustmentSelectorOnRelease() {
+void TestMidiMapping::routesAdjustmentSelectorOnNoteOn() {
     MidiInputRouter router;
     auto mapping = MidiMapping::ctr2Default();
     mapping.buttons[5] = {QStringLiteral("adjust_noise_blanker_level"), QString()};
@@ -735,10 +737,58 @@ void TestMidiMapping::routesAdjustmentSelectorOnRelease() {
     QSignalSpy buttonSpy(&router, &MidiInputRouter::buttonActionRequested);
 
     router.processEvent(QStringLiteral("ctr2"), 0x90, 5, 127);
-    QCOMPARE(buttonSpy.count(), 0);
+    QCOMPARE(buttonSpy.count(), 1);
     router.processEvent(QStringLiteral("ctr2"), 0x80, 5, 0);
     QCOMPARE(buttonSpy.count(), 1);
     QCOMPARE(buttonSpy.at(0).at(0).toString(), QStringLiteral("adjust_noise_blanker_level"));
+}
+
+void TestMidiMapping::routesCtr2ShortAndLongButtons_data() {
+    QTest::addColumn<bool>("extended");
+    QTest::newRow("normal") << false;
+    QTest::newRow("extended") << true;
+}
+
+void TestMidiMapping::routesCtr2ShortAndLongButtons() {
+    QFETCH(bool, extended);
+    auto mapping = extended ? MidiMapping::ctr2ExtendedDefault() : MidiMapping::ctr2Default();
+    const auto notes = MidiMapping::ctr2ButtonNotes(extended);
+    for (int i = 0; i < notes.size(); ++i)
+        mapping.buttons[notes[i]] = {i % 4 < 2 ? QStringLiteral("ft8_rx") : QStringLiteral("ft8_tx"), {}};
+    QVERIFY(!MidiMapping::supportedButtonActions().contains(QStringLiteral("ft8_rx")));
+    QVERIFY(!MidiMapping::supportedButtonActions().contains(QStringLiteral("ft8_tx")));
+    MidiMapping::DeviceMapping migrated;
+    QString error;
+    QVERIFY2(MidiMapping::fromJson(MidiMapping::toJson(mapping), &migrated, &error), qPrintable(error));
+    QCOMPARE(migrated.knobs, mapping.knobs);
+    for (int note : notes) {
+        const bool longPress = extended ? note >= 25 : note >= 11;
+        QCOMPARE(migrated.buttons[note].action,
+                 longPress ? QStringLiteral("set_ft8_frequency") : QStringLiteral("adjust_ft8_rx_tx"));
+    }
+    mapping = migrated;
+    MidiInputRouter router;
+    router.setMapping(QStringLiteral("ctr2"), mapping);
+    QSignalSpy actions(&router, &MidiInputRouter::buttonActionRequested);
+    QSignalSpy ptt(&router, &MidiInputRouter::pttStateChanged);
+    QSignalSpy dit(&router, &MidiInputRouter::ditStateChanged);
+    QSignalSpy dah(&router, &MidiInputRouter::dahStateChanged);
+    for (int i = 0; i < notes.size(); ++i) {
+        actions.clear();
+        // Each physical release sends a NoteOn, including repeated gestures
+        // without any intervening NoteOff. Cover every short/long bank.
+        router.processEvent(QStringLiteral("ctr2"), 0x90, notes[i], 127);
+        QCOMPARE(actions.count(), 1);
+        QCOMPARE(actions[0][0].toString(), mapping.buttons[notes[i]].action);
+        router.processEvent(QStringLiteral("ctr2"), 0x90, notes[i], 1);
+        QCOMPARE(actions.count(), 2);
+        router.processEvent(QStringLiteral("ctr2"), 0x80, notes[i], 64);
+        router.processEvent(QStringLiteral("ctr2"), 0x90, notes[i], 0);
+        QCOMPARE(actions.count(), 2); // Neither form of NoteOff repeats an action.
+    }
+    QVERIFY(ptt.isEmpty());
+    QVERIFY(dit.isEmpty());
+    QVERIFY(dah.isEmpty());
 }
 
 QTEST_APPLESS_MAIN(TestMidiMapping)
