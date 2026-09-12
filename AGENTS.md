@@ -50,6 +50,11 @@ See `docs/PROJECT_STATUS.md` for boundaries and pending validation.
 
 ## Build, install, and release rules
 
+- README updates are additive. Preserve all existing screenshots, established
+  feature sections, and useful operator documentation unless the user explicitly
+  requests removal; add new release material in the appropriate sections.
+- Public README and release-note text describes the finished functionality.
+  Omit intermediate refinement history unless it materially affects operators.
 - Use `build-android.cmd`; do not replace it with machine-specific commands.
 - Build independently from source changes. Install only when the user asks.
 - Debug: `build-android.cmd -Action Apk`.

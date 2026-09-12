@@ -60,6 +60,8 @@ to CTR2-MIDI control, navigation, macros, and panadapter behavior.
 - Improve GPU panadapter rendering reliability.
 - Make touch input on Pan A tune VFO A and touch input on Pan B tune VFO B.
 
+The QRhi rendering and per-pan touch-tuning corrections adapted from PR #3 were contributed by [Fred Klassen](https://github.com/tcpreplay-dev).
+
 ## Validation and scope
 
 The release-signed ARM64 build uses Android version code 32. It has been tested
