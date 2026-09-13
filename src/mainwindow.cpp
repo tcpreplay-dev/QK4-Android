@@ -69,6 +69,9 @@
 // field instead of the on-screen numeric keypad.
 static bool androidHasHardwareKeyboard();
 #endif
+#if defined(Q_OS_IOS)
+#include "ios/ioskeyboard.h"
+#endif
 #include <QVBoxLayout>
 #include <QDialogButtonBox>
 #include <QLineEdit>
@@ -4191,7 +4194,7 @@ void MainWindow::setupUi() {
 #if defined(Q_OS_ANDROID)
         useKeypadDialog = !androidHasHardwareKeyboard();
 #elif defined(Q_OS_IOS)
-        useKeypadDialog = true;
+        useKeypadDialog = !iosHasHardwareKeyboard();
 #endif
         if (useKeypadDialog) {
             showFrequencyEntry(useB);
